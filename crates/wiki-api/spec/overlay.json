@@ -1,0 +1,887 @@
+{
+  "externalDocs": {
+    "description": "Справочник API Яндекс Вики",
+    "url": "https://yandex.ru/support/wiki/ru/api-ref/about"
+  },
+  "servers": [
+    {
+      "url": "https://api.wiki.yandex.net"
+    }
+  ],
+  "security": [
+    {
+      "OAuth": []
+    },
+    {
+      "IamToken": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "OAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "OAuth-токен пользователя в формате `OAuth <токен>`. Подходит для организаций Яндекс 360 для бизнеса и Yandex Identity Hub. Заголовок подставляет сервер из профиля, агент его не передаёт."
+      },
+      "IamToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "IAM-токен пользователя в формате `Bearer <IAM-токен>`, только для организаций Yandex Cloud; действует не больше 12 часов. Сервисный аккаунт Yandex Cloud не подходит. Заголовок подставляет сервер, агент его не передаёт."
+      }
+    },
+    "parameters": {
+      "XOrgId": {
+        "name": "X-Org-Id",
+        "in": "header",
+        "required": false,
+        "description": "Идентификатор организации Яндекс 360 для бизнеса. В запросе нужен ровно один из заголовков: `X-Org-Id` или `X-Cloud-Org-Id`. Подставляет сервер из профиля, агент его не передаёт.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "XCloudOrgId": {
+        "name": "X-Cloud-Org-Id",
+        "in": "header",
+        "required": false,
+        "description": "Идентификатор организации Yandex Identity Hub (Yandex Cloud). В запросе нужен ровно один из заголовков: `X-Org-Id` или `X-Cloud-Org-Id`. Подставляет сервер из профиля, агент его не передаёт.",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "PageUpdateRequest": {
+        "title": "PageUpdateRequest",
+        "description": "Тело `update_page`: схема официальной спецификации и поле `revision` из справочника.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PageUpdateSchema"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string",
+                "description": "Версия страницы, на которой основано изменение. Если страницу успели изменить, вернётся ошибка конфликта."
+              }
+            }
+          }
+        ]
+      },
+      "PageAppendContentRequest": {
+        "title": "PageAppendContentRequest",
+        "description": "Тело `append_page_content`: схема официальной спецификации и поле `revision` из справочника.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PageAppendContentSchema"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string",
+                "description": "Версия страницы, на которой основано изменение. Если страницу успели изменить, вернётся ошибка конфликта."
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "parameter_descriptions": {
+    "idx": "Числовой id страницы: поле `id` из ответа `get_page`, `get_page_by_id` или `create_page`. Не slug и не URL.",
+    "cursor": "Курсор страницы выдачи: `next_cursor` (или `prev_cursor`) из предыдущего ответа. Без параметра возвращается первая страница.",
+    "page_size": "Число результатов на странице выдачи. Ответ может содержать меньше; выдача закончилась, когда `next_cursor` равен null.",
+    "order_by": "Поле сортировки выдачи; направление задаёт `order_direction`.",
+    "order_direction": "Направление сортировки по `order_by`: `asc` или `desc`.",
+    "fields": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+    "is_silent": "Если `true`, не отправлять подписчикам уведомление об изменении.",
+    "file_id": "Числовой id вложения на этой странице: поле `id` элемента `results` из ответа `list_attachments`.",
+    "session_id": "Идентификатор сессии загрузки (UUID): поле `session_id` из ответа `create_upload_session`.",
+    "task_id": "Идентификатор асинхронной операции: поле `operation.id` из ответа операции, которая её запустила.",
+    "access_id": "Идентификатор персонального доступа: поле `id` из ответа `create_page_access` или `access_lists.direct[].id` из ответа `get_page_by_id` с `fields=access_lists`.",
+    "prevent_selflock": "Если `true`, вернуть ошибку, когда после изменения соавтор потеряет право читать страницу или менять доступы к ней. Рекомендуется `true`.",
+    "include_self": "Если `true`, включить в ответ и саму страницу.",
+    "show_all": "Если `true`, администратор организации или пространства получает все страницы, включая недоступные ему по обычным правам. Для остальных ничего не меняет.",
+    "actuality": "Только актуальные (`actual`) или только устаревшие (`obsolete`) страницы.",
+    "raise_on_redirect": "Если `true` и у страницы настроено перенаправление, вернуть ошибку с данными исходной и целевой страниц вместо самой страницы.",
+    "revision_id": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`."
+  },
+  "toolsets": [
+    {
+      "name": "pages",
+      "description": "Страницы: чтение, создание, правка, удаление и восстановление, копирование, подстраницы, поиск, текущий пользователь",
+      "x-default-enabled": true
+    },
+    {
+      "name": "attachments",
+      "description": "Вложения страниц и сессии загрузки файлов",
+      "x-default-enabled": true
+    },
+    {
+      "name": "comments",
+      "description": "Комментарии к страницам",
+      "x-default-enabled": true
+    },
+    {
+      "name": "grids",
+      "description": "Динамические таблицы",
+      "x-default-enabled": true
+    },
+    {
+      "name": "access",
+      "description": "Персональные права доступа к страницам",
+      "x-default-enabled": false
+    },
+    {
+      "name": "extra",
+      "description": "Операции из официальной спецификации, которых нет в справочнике Wiki API",
+      "x-default-enabled": false
+    }
+  ],
+  "operations": {
+    "GET /v1/pages": {
+      "name": "get_page",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Получить страницу по адресу",
+      "description": "Возвращает страницу по адресу (`slug`). Slug — путь относительно корня Вики, например `team/project`: без домена, протокола и косой черты в начале; полный URL не подходит. По умолчанию приходят только `id`, `slug`, `title` и `page_type`: текст страницы и другие блоки запрашивайте через `fields` (например, `fields=content`). Полученный `id` нужен остальным операциям со страницей как `idx`. Старую версию страницы возвращает `revision_id`. Если у страницы настроен редирект, возвращается сама исходная страница, а не цель: куда она ведёт, видно в блоке `redirect` (`fields=redirect`). С `raise_on_redirect=true` такая страница даёт ошибку 400 `REDIRECT_CHAIN`, в `details` — `source_page` и `target_page`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__get_page_details"
+      },
+      "parameter_descriptions": {
+        "slug": "Адрес страницы относительно корня Вики, например `team/project`. Передайте slug, а не полный URL; ненормализованный slug приводится к нормализованному виду."
+      }
+    },
+    "POST /v1/pages": {
+      "name": "create_page",
+      "x-access-level": "write",
+      "toolset": "pages",
+      "summary": "Создать страницу",
+      "description": "Создаёт страницу по адресу `slug` с названием `title` и необязательным исходным текстом `content` в разметке Вики. Если адрес занят, вернётся ошибка. `access_policy` задаёт режим доступа: `inherited` (как у родительской страницы), `all_staff` (всем сотрудникам, роль в `all_staff_role`) или `custom` (персональные доступы). В ответе — параметры новой страницы; её `id` передавайте как `idx` в другие операции.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__create_page"
+      }
+    },
+    "GET /v1/pages/{idx}": {
+      "name": "get_page_by_id",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Получить страницу по id",
+      "description": "Возвращает страницу по числовому id (`idx`). Как и в `get_page`, по умолчанию приходят только основные поля: текст и другие блоки запрашивайте через `fields` (например, `fields=content,attributes`), старую версию — через `revision_id`. Если у страницы настроен редирект, возвращается сама исходная страница, а не цель: куда она ведёт, видно в блоке `redirect` (`fields=redirect`). С `raise_on_redirect=true` такая страница даёт ошибку 400 `REDIRECT_CHAIN`, в `details` — `source_page` и `target_page`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__get_page_details_by_id"
+      }
+    },
+    "POST /v1/pages/{idx}": {
+      "name": "update_page",
+      "x-access-level": "write",
+      "toolset": "pages",
+      "summary": "Изменить страницу",
+      "description": "Изменяет страницу: название (`title`), исходный текст (`content` заменяет весь текст страницы), перенаправление (`redirect`), владельца (`owner`), режим доступа (`access_policy`), актуальность (`actuality`). Передавайте только поля, которые меняются. Чтобы не затереть чужие правки, передайте `revision` — версию, на которой основано изменение: при несовпадении вернётся конфликт, а `allow_merge=true` включает трёхстороннее слияние. Чтобы дописать текст без замены, используйте `append_page_content`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__update_page_details"
+      },
+      "parameter_descriptions": {
+        "allow_merge": "Если `true`, одновременные правки объединяются трёхсторонним слиянием. При `false` несовпадение версий приводит к ошибке конфликта."
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PageUpdateRequest"
+            }
+          }
+        }
+      }
+    },
+    "DELETE /v1/pages/{idx}": {
+      "name": "delete_page",
+      "x-access-level": "destructive",
+      "toolset": "pages",
+      "summary": "Удалить страницу",
+      "description": "Удаляет страницу; с `recursive=true` — вместе со всеми подстраницами (нужны права на удаление каждой, число подстраниц ограничено). Ответ содержит `recovery_token`: сохраните его, по нему `recover_page` восстанавливает страницу.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__delete_page"
+      },
+      "parameter_descriptions": {
+        "recursive": "Если `true`, удалить страницу вместе со всеми подстраницами. Нужны права на удаление всех подстраниц; их число ограничено."
+      }
+    },
+    "POST /v1/pages/move": {
+      "name": "move_page",
+      "x-access-level": "write",
+      "toolset": "extra",
+      "summary": "Перенести страницы",
+      "description": "Переносит страницы на новые адреса вместе с подстраницами. В `operations` — последовательный список переносов: `source` и `target` — slug до и после переноса, `next_to_slug` и `position` (`before`, `after`) задают порядок среди соседних страниц; `copy_inherited_access` копирует унаследованные доступы. `dry_run=true` только проверяет, можно ли выполнить перенос. Операция асинхронная: статус возвращает `get_move_operation_status` по `operation.id` из ответа. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения. Пробный запуск (`dry_run=true`) и настоящий перенос тех же страниц могут вернуть один и тот же id операции: смотрите статус после настоящего запуска.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/index"
+      },
+      "parameter_descriptions": {
+        "dry_run": "Если `true`, только проверить возможность переноса, ничего не меняя."
+      }
+    },
+    "POST /v1/pages/{idx}/clone": {
+      "name": "clone_page",
+      "x-access-level": "write",
+      "toolset": "pages",
+      "summary": "Скопировать страницу",
+      "description": "Запускает асинхронное копирование страницы на адрес `target` (slug); `title` задаёт новое название, `subscribe_me` — подписку на изменения копии. Ответ содержит `operation.id` и `status_url`; статус возвращает `get_clone_operation_status`. Коды ошибок: `SLUG_OCCUPIED` (адрес занят), `SLUG_RESERVED` (зарезервированный адрес), `FORBIDDEN` (нет доступа к исходной странице или к месту копирования), `QUOTA_EXCEEDED` (лимит страниц организации), `IS_CLOUD_PAGE` (облачные страницы не копируются), `CLUSTER_BLOCKED` (раздел временно заблокирован для переноса).",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__clone_page"
+      }
+    },
+    "GET /v1/pages/{idx}/grids": {
+      "name": "list_page_grids",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Список динамических таблиц страницы",
+      "description": "Возвращает динамические таблицы, привязанные к странице: UUID таблицы (`id`, нужен операциям с таблицами), название и время создания. Выдача постраничная: `cursor` и `page_size`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__page_grids"
+      }
+    },
+    "POST /v1/pages/{idx}/append-content": {
+      "name": "append_page_content",
+      "x-access-level": "write",
+      "toolset": "pages",
+      "summary": "Дописать текст на страницу",
+      "description": "Добавляет текст `content` на страницу, не заменяя существующий. Место вставки — ровно одно из полей: `body.location` (`top` — начало, `bottom` — конец страницы), `section` (`id` раздела и `location`: `top` — после заголовка раздела, `bottom` — в конце раздела; разделы нумеруются с 1 по порядку всех заголовков страницы, включая заголовок первого уровня, и раздел продолжается до следующего заголовка того же или более высокого уровня — поэтому раздел заголовка `#` охватывает всю страницу под ним) или `anchor` (`name` якоря; `fallback=true` — вставить в конец страницы, если якоря нет; `regex=true` — искать якорь регулярным выражением по исходному тексту). `revision` включает проверку версии: при несовпадении вернётся конфликт. Так же на страницу вставляют таблицу (`{% wgrid id=\"<UUID>\" %}`) и прикреплённый файл (`{% file src=\"<download_url>\" name=\"<имя>\" %}`). На страницах нового редактора (`wysiwyg`) якоря `{#имя}` в заголовках, блоки `{{anchor}}` и HTML-якоря через `anchor` не находятся (ошибка 400 `ANCHOR_NOT_FOUND`): вставляйте через `section` или `body`, а `anchor` — только с `fallback=true`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__append_content"
+      },
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PageAppendContentRequest"
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/pages/{idx}/revisions": {
+      "name": "list_page_revisions",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "История версий страницы",
+      "description": "Возвращает версии страницы; `ids` оставляет только перечисленные версии. Выдача постраничная: `cursor` и `page_size` (до 50). Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/index"
+      },
+      "parameter_descriptions": {
+        "ids": "Вернуть только версии с этими id, через запятую."
+      }
+    },
+    "GET /v1/pages/{idx}/descendants": {
+      "name": "list_page_descendants_by_id",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Подстраницы по id страницы",
+      "description": "Возвращает подстраницы всех уровней, доступные текущему пользователю, по числовому id страницы. Выдача постраничная: ответ может содержать меньше `page_size` результатов; следующую страницу запрашивайте с `cursor` из `next_cursor`, пока он не станет null. Администратор организации или пространства получает все подстраницы с `show_all=true`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__descendants_by_id"
+      }
+    },
+    "GET /v1/pages/descendants": {
+      "name": "list_page_descendants",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Подстраницы по адресу страницы",
+      "description": "Возвращает подстраницы всех уровней по адресу (`slug`) страницы; пустой `slug` — страницы от корня Вики. Выдача постраничная: следующую страницу запрашивайте с `cursor` из `next_cursor`, пока он не станет null.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__descendants_by_slug"
+      },
+      "parameter_descriptions": {
+        "slug": "Адрес страницы относительно корня Вики, например `team/project` (не полный URL). Пустая строка — страницы от корня Вики.",
+        "show_all": "Если `true`, администратор организации или пространства получает все подстраницы, включая недоступные ему по обычным правам. От корня Вики режим доступен только администратору организации."
+      }
+    },
+    "GET /v1/pages/{idx}/backlinks": {
+      "name": "list_page_backlinks",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "Обратные ссылки на страницу",
+      "description": "Возвращает страницы, которые ссылаются на данную. Выдача постраничная: `cursor` и `page_size`. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/index"
+      },
+      "parameter_descriptions": {
+        "for_cluster": "Если `true`, учитывать ссылки и на подстраницы (смысл выведен из названия параметра).",
+        "show_all": "Если `true`, администратор получает и страницы, недоступные ему по обычным правам."
+      }
+    },
+    "GET /v1/pages/attachments/download_by_url": {
+      "name": "download_attachment_by_url",
+      "x-access-level": "read",
+      "toolset": "attachments",
+      "summary": "Скачать вложение по ссылке",
+      "description": "Скачивает вложение по ссылке вида `slug/.files/имя_файла`, например `team/project/.files/report.pdf` (поле `download_url` из `list_attachments` или `list_page_resources` без косой черты в начале: API отдаёт `download_url` как `/team/project/.files/report.pdf`, а принимает только `team/project/.files/report.pdf`, иначе ошибка 400 `VALIDATION_ERROR`). Если страницу перенесли вместе с файлами, новый адрес находится по перенаправлениям. Нужен доступ к чтению страницы. Ответ — содержимое файла.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__download_by_filename_slug_pair"
+      },
+      "parameter_descriptions": {
+        "url": "Ссылка на вложение вида `slug/.files/имя_файла`, например `team/project/.files/report.pdf`: поле `download_url` из `list_attachments`.",
+        "download": "Если `true`, отдать файл для скачивания вместо показа в браузере независимо от MIME-типа."
+      },
+      "responses": {
+        "200": {
+          "description": "Содержимое файла; Content-Type соответствует типу файла.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/pages/{idx}/access": {
+      "name": "create_page_access",
+      "x-access-level": "destructive",
+      "toolset": "access",
+      "summary": "Выдать доступ к странице",
+      "description": "Выдаёт пользователю (`user`) или группе (`group`, только одно из полей) персональный доступ к странице с ролью `role`: `reader` (чтение), `editor` (редактирование), `extra_editor` (расширенное редактирование), `author` (полный доступ). `inheritance`: `inherited` — доступ наследуют подстраницы, `not_inherited` — нет. Набор ролей зависит от режима доступа организации: в старом режиме есть только `editor` и `author`, а `author` назначается только пользователю.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages_access/pagesaccess__create_page_access"
+      }
+    },
+    "DELETE /v1/pages/{idx}/access": {
+      "name": "delete_all_page_accesses",
+      "x-access-level": "destructive",
+      "toolset": "access",
+      "summary": "Удалить все персональные доступы",
+      "description": "Удаляет все персональные доступы страницы, кроме доступа владельца. Вернуть их можно только повторной выдачей. Передавайте `prevent_selflock=true`, чтобы случайно не лишить доступа текущего пользователя.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages_access/pagesaccess__delete_page_accesses"
+      }
+    },
+    "POST /v1/pages/{idx}/access/{access_id}": {
+      "name": "update_page_access",
+      "x-access-level": "destructive",
+      "toolset": "access",
+      "summary": "Изменить доступ к странице",
+      "description": "Меняет роль (`role`: `reader`, `editor`, `extra_editor`, `author`) и наследование подстраницами (`inheritance`: `inherited`, `not_inherited`) существующего персонального доступа `access_id`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages_access/pagesaccess__update_page_access"
+      }
+    },
+    "DELETE /v1/pages/{idx}/access/{access_id}": {
+      "name": "delete_page_access",
+      "x-access-level": "destructive",
+      "toolset": "access",
+      "summary": "Удалить доступ к странице",
+      "description": "Удаляет один персональный доступ `access_id` пользователя или группы. Передавайте `prevent_selflock=true`, чтобы случайно не лишить доступа текущего пользователя.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pages_access/pagesaccess__delete_page_access"
+      }
+    },
+    "GET /v1/pages/{idx}/resources": {
+      "name": "list_page_resources",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Ресурсы страницы",
+      "description": "Возвращает вложения и динамические таблицы страницы одним списком: у каждого элемента `results` есть тип `type` (`attachment` или `grid`) и данные `item`. `types` оставляет нужные типы, `q` ищет по названию. Выдача постраничная: `cursor` и `page_size`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/pagesresources/pagesresources__resources"
+      },
+      "parameter_descriptions": {
+        "types": "Нужные типы ресурсов через запятую: `attachment`, `grid`.",
+        "q": "Поиск по названию ресурса."
+      }
+    },
+    "GET /v1/pages/{idx}/attachments": {
+      "name": "list_attachments",
+      "x-access-level": "read",
+      "toolset": "attachments",
+      "summary": "Список вложений страницы",
+      "description": "Возвращает вложения страницы: `id` (нужен для скачивания и удаления), имя, `download_url`, размер в МиБ, MIME-тип, наличие превью и статус проверки антивирусом. Выдача постраничная: `cursor` и `page_size`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__attachments"
+      }
+    },
+    "POST /v1/pages/{idx}/attachments": {
+      "name": "attach_uploaded_files",
+      "x-access-level": "write",
+      "toolset": "attachments",
+      "summary": "Прикрепить загруженные файлы",
+      "description": "Прикрепляет к странице файлы из завершённых сессий загрузки: `upload_sessions` — список `session_id`. Порядок: `create_upload_session` → `upload_file_part` → `finish_upload_session` → `attach_uploaded_files`. Сессии должны принадлежать текущему пользователю и организации; нужно право редактирования страницы. В тексте страницы файл сам не появляется: добавьте разметку `{% file src=\"<download_url>\" name=\"<имя>\" %}` через `append_page_content`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__attach_file"
+      }
+    },
+    "GET /v1/pages/{idx}/attachments/{file_id}": {
+      "name": "get_attachment",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "Вложение страницы",
+      "description": "Возвращает метаданные одного вложения по `file_id`: имя, `download_url`, размер в МиБ, MIME-тип, наличие превью и статус проверки антивирусом. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/index"
+      }
+    },
+    "DELETE /v1/pages/{idx}/attachments/{file_id}": {
+      "name": "delete_attachment",
+      "x-access-level": "destructive",
+      "toolset": "attachments",
+      "summary": "Удалить вложение",
+      "description": "Удаляет вложение страницы. Доступно загрузившему файл или пользователю с правом управления доступами страницы; также нужен доступ к чтению страницы. Ссылки на файл в тексте страницы не удаляются.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__delete_attach"
+      }
+    },
+    "GET /v1/pages/{idx}/attachments/{file_id}/download": {
+      "name": "download_attachment",
+      "x-access-level": "read",
+      "toolset": "attachments",
+      "summary": "Скачать вложение по id",
+      "description": "Скачивает вложение по числовому id страницы и `file_id` из `list_attachments`. Ответ — содержимое файла.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__download_by_file_id"
+      },
+      "responses": {
+        "200": {
+          "description": "Содержимое файла; Content-Type соответствует типу файла.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/pages/{idx}/attachments/{file_id}/preview": {
+      "name": "download_attachment_preview",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "Скачать превью вложения",
+      "description": "Возвращает превью вложения-изображения. Если превью нет (например, файл не изображение), приходит PNG размером 1 пиксель. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения. Превью отдаётся картинкой (`image/png`) даже при `has_preview=false`: тогда это заглушка.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/index"
+      },
+      "responses": {
+        "200": {
+          "description": "Содержимое файла; Content-Type соответствует типу файла.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /v1/pages/{idx}/comments": {
+      "name": "list_comments",
+      "x-access-level": "read",
+      "toolset": "comments",
+      "summary": "Комментарии страницы",
+      "description": "Возвращает начальные комментарии обсуждений на странице; ответы в ветках не входят, их возвращает `get_comment_thread`. По умолчанию — по дате создания от новых к старым. `status_filter` оставляет решённые (`resolved`) или нерешённые (`unresolved`) обсуждения. Выдача постраничная: `cursor` и `page_size`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/comments/pagescomments__comments"
+      },
+      "parameter_descriptions": {
+        "status_filter": "Статус обсуждения: `resolved` (решённые) или `unresolved` (нерешённые)."
+      }
+    },
+    "POST /v1/pages/{idx}/comments": {
+      "name": "create_comment",
+      "x-access-level": "write",
+      "toolset": "comments",
+      "summary": "Добавить комментарий",
+      "description": "Добавляет комментарий с текстом `body`. Для нового обсуждения не передавайте `thread_id`; для ответа в ветке передайте в `thread_id` id её начального комментария, а в `parent_id` — комментарий, на который отвечаете (сам `parent_id` к ветке не привязывает). `inline_text` — фрагмент текста страницы, к которому относится комментарий. Нужен доступ к чтению страницы; комментарии должны быть включены в организации и на странице.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/comments/pagescomments__create_comment"
+      }
+    },
+    "GET /v1/pages/{idx}/comments/{comment_id}/thread": {
+      "name": "get_comment_thread",
+      "x-access-level": "read",
+      "toolset": "comments",
+      "summary": "Ветка комментариев",
+      "description": "Возвращает ответы в ветке комментария `comment_id` от старых к новым; сам начальный комментарий в ответ не входит. Выдача постраничная: `cursor` и `page_size`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/comments/pagescomments__thread_comments"
+      },
+      "parameter_descriptions": {
+        "comment_id": "Id начального комментария ветки: поле `id` элемента `results` из ответа `list_comments`."
+      }
+    },
+    "DELETE /v1/pages/{idx}/comments/{comment_id}": {
+      "name": "delete_comment",
+      "x-access-level": "destructive",
+      "toolset": "comments",
+      "summary": "Удалить комментарий",
+      "description": "Удаляет комментарий; доступно автору или пользователю с правом управления доступами страницы. Удаление начального комментария удаляет и все ответы в его ветке. В ответе — число оставшихся активных комментариев страницы.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/comments/pagescomments__delete_comment"
+      },
+      "parameter_descriptions": {
+        "comment_id": "Id комментария на этой странице: поле `id` из ответа `list_comments`, `get_comment_thread` или `create_comment`."
+      }
+    },
+    "POST /v1/grids": {
+      "name": "create_grid",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Создать динамическую таблицу",
+      "description": "Создаёт динамическую таблицу с названием `title` как ресурс существующей страницы `page` (`id` или `slug`; если переданы оба, используется `id`). Ответ содержит UUID таблицы (`id`) и `revision`. На странице таблица сама не появляется: вставьте разметку `{% wgrid id=\"<UUID>\" %}` через `append_page_content`. Затем добавьте столбцы (`add_grid_columns`) и строки (`add_grid_rows`).",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__create_grid"
+      }
+    },
+    "GET /v1/grids/{idx}": {
+      "name": "get_grid",
+      "x-access-level": "read",
+      "toolset": "grids",
+      "summary": "Получить динамическую таблицу",
+      "description": "Возвращает таблицу: структуру (столбцы), строки и текущую `revision`, которую передают в изменяющие операции. `only_cols` и `only_rows` ограничивают столбцы и строки, `filter` отбирает строки, `sort` сортирует, `revision` возвращает старую версию таблицы.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__get_grid"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы.",
+        "only_cols": "Вернуть только эти столбцы: slug через запятую.",
+        "only_rows": "Вернуть только эти строки: id через запятую.",
+        "filter": "Условие отбора строк, например `[slug] ~ wiki AND [slug2] < 32`.",
+        "sort": "Сортировка строк по столбцам, например `slug, -slug2` (минус — по убыванию).",
+        "revision": "Вернуть старую версию таблицы с этим номером.",
+        "fields": "Дополнительные блоки ответа через запятую: `attributes`, `user_permissions`."
+      }
+    },
+    "POST /v1/grids/{idx}": {
+      "name": "update_grid",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Изменить динамическую таблицу",
+      "description": "Меняет настройки таблицы: название (`title`) и сортировку по умолчанию (`default_sort` — список объектов вида `{\"<slug столбца>\": \"asc\"}`). `revision` — версия таблицы, на которой основано изменение. В ответе — новая `revision`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__update_grid"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "DELETE /v1/grids/{idx}": {
+      "name": "delete_grid",
+      "x-access-level": "destructive",
+      "toolset": "grids",
+      "summary": "Удалить динамическую таблицу",
+      "description": "Удаляет динамическую таблицу со всеми данными. Доступно создателю таблицы или пользователю с правом управления доступами страницы.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__delete_grid"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/rows": {
+      "name": "add_grid_rows",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Добавить строки таблицы",
+      "description": "Добавляет строки. Столбцы должны уже существовать (`add_grid_columns`). `rows` — массив объектов: ключ — slug столбца, значение — содержимое ячейки типа столбца, например `{\"rows\": [{\"id\": 1, \"name\": \"One\"}]}`. Место вставки — `after_row_id` или `position` (с нуля), по умолчанию в конец. В ответе — id новых строк и новая `revision`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__add_rows"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "DELETE /v1/grids/{idx}/rows": {
+      "name": "remove_grid_rows",
+      "x-access-level": "destructive",
+      "toolset": "grids",
+      "summary": "Удалить строки таблицы",
+      "description": "Удаляет строки с id из `row_ids` вместе с данными. `revision` — версия таблицы, на которой основано изменение.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__remove_rows"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/columns": {
+      "name": "add_grid_columns",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Добавить столбцы таблицы",
+      "description": "Добавляет столбцы: в `columns` у каждого обязательны уникальный `slug`, `title`, `type` (`string`, `number`, `date`, `select`, `staff`, `checkbox`, `ticket`, `ticket_field`) и `required`. `position` — позиция вставки с нуля, по умолчанию в конец таблицы. В ответе — новая `revision`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__add_columns"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "DELETE /v1/grids/{idx}/columns": {
+      "name": "remove_grid_columns",
+      "x-access-level": "destructive",
+      "toolset": "grids",
+      "summary": "Удалить столбцы таблицы",
+      "description": "Удаляет столбцы со slug из `column_slugs` вместе с данными. `revision` — версия таблицы, на которой основано изменение.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__remove_columns"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/columns/suggest": {
+      "name": "suggest_grid_column",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "Проверить slug столбца",
+      "description": "Проверяет, свободен ли slug столбца, и предлагает замену, если он занят; если передан `title`, slug строится из него. Таблицу не меняет. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/index"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/cells": {
+      "name": "update_grid_cells",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Изменить ячейки таблицы",
+      "description": "Меняет значения ячеек: `cells` — непустой список объектов `{row_id, column_slug, value}`. `revision` — версия таблицы, на которой основано изменение: при параллельной правке той же ячейки возможен конфликт, правки других ячеек объединяются.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__update_cells"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/column/{column_slug}": {
+      "name": "update_grid_column",
+      "x-access-level": "write",
+      "toolset": "extra",
+      "summary": "Изменить столбец таблицы",
+      "description": "Меняет свойства столбца `column_slug`: название, описание, обязательность, ширину, формат текста, закрепление, цвет, множественный выбор и варианты выбора. Передавайте только изменяемые поля. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/index"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы.",
+        "column_slug": "Slug столбца из структуры таблицы (`get_grid`)."
+      }
+    },
+    "POST /v1/grids/{idx}/rows/move": {
+      "name": "move_grid_rows",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Переместить строки таблицы",
+      "description": "Перемещает строку `row_id` и `rows_count` следующих за ней строк: после строки `after_row_id` (приоритетнее) или на позицию `position` с нуля; без обоих полей — в конец таблицы.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__move_rows"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/rows/{row_id}": {
+      "name": "update_grid_row",
+      "x-access-level": "write",
+      "toolset": "extra",
+      "summary": "Изменить оформление строки таблицы",
+      "description": "Меняет оформление строки `row_id`: закрепление (`pinned`) и цвет фона (`color`). Значения ячеек меняет `update_grid_cells`. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/index"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы.",
+        "row_id": "Id строки из ответа `get_grid` или `add_grid_rows`."
+      }
+    },
+    "POST /v1/grids/{idx}/columns/move": {
+      "name": "move_grid_columns",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Переместить столбцы таблицы",
+      "description": "Перемещает столбец `column_slug` и `columns_count` следующих за ним столбцов на позицию `position` (с нуля).",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__move_columns"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "POST /v1/grids/{idx}/clone": {
+      "name": "clone_grid",
+      "x-access-level": "write",
+      "toolset": "grids",
+      "summary": "Скопировать динамическую таблицу",
+      "description": "Запускает асинхронное копирование таблицы на страницу `target` (slug; если страницы нет, она будет создана). `title` задаёт новое название, `with_data=true` копирует и строки. Статус возвращает `get_clone_inline_grid_operation_status` по `operation.id` из ответа.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/grids/grids__clone_grid"
+      },
+      "parameter_descriptions": {
+        "idx": "UUID динамической таблицы: поле `id` из ответа `create_grid` или `results[].id` из ответа `list_page_grids`. Это не числовой id страницы."
+      }
+    },
+    "GET /v1/users/me": {
+      "name": "get_current_user",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Текущий пользователь",
+      "description": "Возвращает пользователя, от имени которого выполняются запросы: логин, личный раздел (`home_cluster`), идентификатор и организацию. Подходит для проверки токена и организации.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/users/users__me"
+      }
+    },
+    "POST /v1/upload_sessions": {
+      "name": "create_upload_session",
+      "x-access-level": "write",
+      "toolset": "attachments",
+      "summary": "Создать сессию загрузки файла",
+      "description": "Создаёт сессию загрузки файла: `file_name` и точный размер `file_size` в байтах. Ответ содержит `session_id` и `storage_type`. Дальше: `upload_file_part` → `finish_upload_session` → `attach_uploaded_files`. Незавершённые сессии занимают квоту: ненужные отменяйте через `abort_upload_session` или `abort_all_upload_sessions`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__create_upload_session"
+      }
+    },
+    "POST /v1/upload_sessions/abort_active_uploads": {
+      "name": "abort_all_upload_sessions",
+      "x-access-level": "write",
+      "toolset": "attachments",
+      "summary": "Прервать все сессии загрузки",
+      "description": "Отменяет все активные сессии загрузки файлов текущего пользователя, чтобы освободить квоту. Незавершённые загрузки придётся начинать заново.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__abort_all"
+      }
+    },
+    "GET /v1/upload_sessions/{session_id}": {
+      "name": "get_upload_session",
+      "x-access-level": "read",
+      "toolset": "attachments",
+      "summary": "Получить сессию загрузки",
+      "description": "Возвращает сессию загрузки: статус (`not_started`, `in_progress`, `finished`, `aborted`, `used`, `cleanup`), имя и размер файла, `storage_type`. Сессия должна принадлежать текущему пользователю и организации.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__get_upload_session"
+      }
+    },
+    "PUT /v1/upload_sessions/{session_id}/upload_part": {
+      "name": "upload_file_part",
+      "x-access-level": "write",
+      "toolset": "attachments",
+      "summary": "Загрузить часть файла",
+      "description": "Загружает часть файла в сессию: тело — байты части (`application/octet-stream`), `part_number` — номер части от 1 до 10000. Файл до 16 МиБ передавайте одной частью с `part_number=1`. Больший файл режьте на части по 5–16 МиБ и нумеруйте подряд с 1; меньше 5 МиБ может быть только последняя часть. Части можно загружать параллельно и повторять при ошибке. Если `storage_type` сессии не `s3` и не `custom_s3` (загрузка через сервис загрузки файлов), передайте файл целиком одним запросом: размер должен совпасть с `file_size`. После всех частей вызовите `finish_upload_session`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__upload_part"
+      },
+      "parameter_descriptions": {
+        "part_number": "Номер части от 1 до 10000. Для файла целиком — 1; части нумеруйте подряд с 1."
+      },
+      "requestBody": {
+        "required": true,
+        "description": "Байты части файла.",
+        "content": {
+          "application/octet-stream": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            }
+          }
+        }
+      }
+    },
+    "POST /v1/upload_sessions/{session_id}/finish": {
+      "name": "finish_upload_session",
+      "x-access-level": "write",
+      "toolset": "attachments",
+      "summary": "Завершить сессию загрузки",
+      "description": "Завершает сессию после загрузки всех частей. После этого файл прикрепляют к странице через `attach_uploaded_files`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__complete_multipart_upload"
+      }
+    },
+    "POST /v1/upload_sessions/{session_id}/abort": {
+      "name": "abort_upload_session",
+      "x-access-level": "write",
+      "toolset": "attachments",
+      "summary": "Прервать сессию загрузки",
+      "description": "Отменяет загрузку файла в сессии; продолжить её после этого нельзя.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__abort_multipart_upload"
+      }
+    },
+    "GET /v1/operations/move/{task_id}": {
+      "name": "get_move_operation_status",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "Статус переноса страниц",
+      "description": "Возвращает статус асинхронного переноса страниц (`move_page`): `status` (`scheduled`, `in_progress`, `success`, `failed`), `progress` и `result`. Опрашивайте, пока операция не завершится. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/operations/index"
+      }
+    },
+    "GET /v1/operations/clone/{task_id}": {
+      "name": "get_clone_operation_status",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Статус копирования страницы",
+      "description": "Возвращает статус асинхронного копирования страницы (`clone_page`): `status` (`scheduled`, `in_progress`, `success`, `failed`), `progress` и `result`. Опрашивайте, пока операция не завершится.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/operations/operations__get_clone_operation_status"
+      }
+    },
+    "GET /v1/operations/clone_inline_grid/{task_id}": {
+      "name": "get_clone_inline_grid_operation_status",
+      "x-access-level": "read",
+      "toolset": "grids",
+      "summary": "Статус копирования таблицы",
+      "description": "Возвращает статус асинхронного копирования динамической таблицы (`clone_grid`): `status` (`scheduled`, `in_progress`, `success`, `failed`), `progress` и `result`. Опрашивайте, пока операция не завершится.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/operations/operations__get_clone_inline_grid_operation_status"
+      }
+    },
+    "POST /v1/recovery_tokens/{idx}/recover": {
+      "name": "recover_page",
+      "x-access-level": "write",
+      "toolset": "pages",
+      "summary": "Восстановить удалённую страницу",
+      "description": "Восстанавливает удалённую страницу по токену из ответа `delete_page`. Одного токена недостаточно: права пользователя проверяются заново. Если в организации ограничено создание страниц без родительской, нужна существующая родительская страница и право создавать в ней подстраницы.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/recovery_tokens/recovery_tokens__recover_page_by_token"
+      },
+      "parameter_descriptions": {
+        "idx": "Токен восстановления (UUID): поле `recovery_token` из ответа `delete_page`."
+      }
+    },
+    "POST /v1/search": {
+      "name": "search",
+      "x-access-level": "read",
+      "toolset": "pages",
+      "summary": "Поиск по Вики",
+      "description": "Ищет по тексту страниц и файлов Вики: `query` — текст запроса. `filters`: `type` (`page` или `file`), `authors`, `cluster` (slug раздела), `created_at` и `modified_at` (интервалы `from`/`to`), `show_obsolete`. `order_by`: `relevancy`, `creation_date`, `modified_date`. Разбивка на страницы здесь своя: `cursor` — номер страницы выдачи с 1 (до 500), `limit` — до 50 результатов. `highlight=true` выделяет совпадения тегами `<em>`.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/search/search__search"
+      }
+    },
+    "GET /v1/spaces": {
+      "name": "list_spaces",
+      "x-access-level": "read",
+      "toolset": "extra",
+      "summary": "Пространства организации",
+      "description": "Возвращает разделы (пространства) организации, доступные текущему пользователю, с его ролями. `slugs` — фильтр по slug через запятую, `is_personal` — только личные или только общие. Выдача постраничная: `cursor` и `page_size`. Операции нет в справочнике Wiki API: описание составлено по официальной OpenAPI-спецификации, поведение может отличаться и меняться без предупреждения.",
+      "externalDocs": {
+        "url": "https://yandex.ru/support/wiki/ru/api-ref/index"
+      },
+      "parameter_descriptions": {
+        "slugs": "Вернуть только разделы с этими slug, через запятую.",
+        "is_personal": "`true` — только личные разделы, `false` — только общие.",
+        "show_all": "Если `true`, администратор получает и разделы, недоступные ему по обычным правам."
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+# Пример запуска wiki-mcp в HTTP-режиме (docs/http.md).
+#
+#   docker compose up --build -d
+#   curl http://127.0.0.1:8767/health
+#
+# Токенов здесь нет: каждый агент передаёт свой токен Wiki в заголовке
+# Authorization (и организацию в X-Org-Id или X-Cloud-Org-Id) в конфигурации своего
+# MCP-клиента.
+services:
+  wiki-mcp:
+    build: .
+    image: wiki-mcp:local
+    # Флаги serve: уровень доступа, наборы инструментов, организация и т. п. добавляйте
+    # сюда, например --allow-write, --toolsets pages,grids или --org-id <ID>.
+    # --allowed-host wiki-mcp — для других контейнеров этой сети, которые обращаются
+    # к серверу по имени сервиса (http://wiki-mcp:8767/mcp).
+    command:
+      - serve
+      - --http
+      - --listen
+      - 0.0.0.0:8767
+      - --allowed-host
+      - wiki-mcp
+    ports:
+      # Только loopback хоста. Для доступа с других машин поставьте перед сервером
+      # reverse proxy с TLS и добавьте его имя через --allowed-host.
+      - "127.0.0.1:8767:8767"
+    environment:
+      RUST_LOG: warn
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped

@@ -1,0 +1,761 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "json!({\"toolsets\": sets, \"tools\": tools})"
+---
+{
+  "tools": [
+    {
+      "access": "write",
+      "args": {},
+      "body": null,
+      "name": "abort_all_upload_sessions",
+      "request": "POST /v1/upload_sessions/abort_active_uploads",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "write",
+      "args": {
+        "session_id": "string"
+      },
+      "body": null,
+      "name": "abort_upload_session",
+      "request": "POST /v1/upload_sessions/{session_id}/abort",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "add_grid_columns",
+      "request": "POST /v1/grids/{idx}/columns",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "add_grid_rows",
+      "request": "POST /v1/grids/{idx}/rows",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "any",
+        "fields": "string?",
+        "idx": "integer",
+        "is_silent": "boolean?"
+      },
+      "body": "Json",
+      "name": "append_page_content",
+      "request": "POST /v1/pages/{idx}/append-content",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "integer"
+      },
+      "body": "Json",
+      "name": "attach_uploaded_files",
+      "request": "POST /v1/pages/{idx}/attachments",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "clone_grid",
+      "request": "POST /v1/grids/{idx}/clone",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "integer"
+      },
+      "body": "Json",
+      "name": "clone_page",
+      "request": "POST /v1/pages/{idx}/clone",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "integer"
+      },
+      "body": "Json",
+      "name": "create_comment",
+      "request": "POST /v1/pages/{idx}/comments",
+      "response": "Json",
+      "toolset": "comments"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object"
+      },
+      "body": "Json",
+      "name": "create_grid",
+      "request": "POST /v1/grids",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "fields": "string?",
+        "is_silent": "boolean?"
+      },
+      "body": "Json",
+      "name": "create_page",
+      "request": "POST /v1/pages",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "body": "object",
+        "idx": "integer"
+      },
+      "body": "Json",
+      "name": "create_page_access",
+      "request": "POST /v1/pages/{idx}/access",
+      "response": "Json",
+      "toolset": "access"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object"
+      },
+      "body": "Json",
+      "name": "create_upload_session",
+      "request": "POST /v1/upload_sessions",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "idx": "integer",
+        "prevent_selflock": "boolean?"
+      },
+      "body": null,
+      "name": "delete_all_page_accesses",
+      "request": "DELETE /v1/pages/{idx}/access",
+      "response": "Json",
+      "toolset": "access"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "file_id": "integer",
+        "idx": "integer"
+      },
+      "body": null,
+      "name": "delete_attachment",
+      "request": "DELETE /v1/pages/{idx}/attachments/{file_id}",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "comment_id": "integer",
+        "idx": "integer"
+      },
+      "body": null,
+      "name": "delete_comment",
+      "request": "DELETE /v1/pages/{idx}/comments/{comment_id}",
+      "response": "Json",
+      "toolset": "comments"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "idx": "string"
+      },
+      "body": null,
+      "name": "delete_grid",
+      "request": "DELETE /v1/grids/{idx}",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "idx": "integer",
+        "recursive": "boolean?"
+      },
+      "body": null,
+      "name": "delete_page",
+      "request": "DELETE /v1/pages/{idx}",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "access_id": "string",
+        "idx": "integer",
+        "prevent_selflock": "boolean?"
+      },
+      "body": null,
+      "name": "delete_page_access",
+      "request": "DELETE /v1/pages/{idx}/access/{access_id}",
+      "response": "Json",
+      "toolset": "access"
+    },
+    {
+      "access": "read",
+      "args": {
+        "file_id": "integer",
+        "idx": "integer"
+      },
+      "body": null,
+      "name": "download_attachment",
+      "request": "GET /v1/pages/{idx}/attachments/{file_id}/download",
+      "response": "Binary",
+      "toolset": "attachments"
+    },
+    {
+      "access": "read",
+      "args": {
+        "download": "boolean?",
+        "url": "string"
+      },
+      "body": null,
+      "name": "download_attachment_by_url",
+      "request": "GET /v1/pages/attachments/download_by_url",
+      "response": "Binary",
+      "toolset": "attachments"
+    },
+    {
+      "access": "read",
+      "args": {
+        "file_id": "integer",
+        "idx": "integer"
+      },
+      "body": null,
+      "name": "download_attachment_preview",
+      "request": "GET /v1/pages/{idx}/attachments/{file_id}/preview",
+      "response": "Binary",
+      "toolset": "extra"
+    },
+    {
+      "access": "write",
+      "args": {
+        "session_id": "string"
+      },
+      "body": null,
+      "name": "finish_upload_session",
+      "request": "POST /v1/upload_sessions/{session_id}/finish",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "read",
+      "args": {
+        "file_id": "integer",
+        "idx": "integer"
+      },
+      "body": null,
+      "name": "get_attachment",
+      "request": "GET /v1/pages/{idx}/attachments/{file_id}",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "read",
+      "args": {
+        "task_id": "string"
+      },
+      "body": null,
+      "name": "get_clone_inline_grid_operation_status",
+      "request": "GET /v1/operations/clone_inline_grid/{task_id}",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "read",
+      "args": {
+        "task_id": "string"
+      },
+      "body": null,
+      "name": "get_clone_operation_status",
+      "request": "GET /v1/operations/clone/{task_id}",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "comment_id": "integer",
+        "cursor": "string?",
+        "idx": "integer",
+        "page_size": "integer?"
+      },
+      "body": null,
+      "name": "get_comment_thread",
+      "request": "GET /v1/pages/{idx}/comments/{comment_id}/thread",
+      "response": "Json",
+      "toolset": "comments"
+    },
+    {
+      "access": "read",
+      "args": {},
+      "body": null,
+      "name": "get_current_user",
+      "request": "GET /v1/users/me",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "fields": "string?",
+        "filter": "string?",
+        "idx": "string",
+        "only_cols": "string?",
+        "only_rows": "string?",
+        "revision": "integer?",
+        "sort": "string?"
+      },
+      "body": null,
+      "name": "get_grid",
+      "request": "GET /v1/grids/{idx}",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "read",
+      "args": {
+        "task_id": "string"
+      },
+      "body": null,
+      "name": "get_move_operation_status",
+      "request": "GET /v1/operations/move/{task_id}",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "read",
+      "args": {
+        "fields": "string?",
+        "raise_on_redirect": "boolean?",
+        "revision_id": "integer?",
+        "slug": "string"
+      },
+      "body": null,
+      "name": "get_page",
+      "request": "GET /v1/pages",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "fields": "string?",
+        "idx": "integer",
+        "raise_on_redirect": "boolean?",
+        "revision_id": "integer?"
+      },
+      "body": null,
+      "name": "get_page_by_id",
+      "request": "GET /v1/pages/{idx}",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "session_id": "string"
+      },
+      "body": null,
+      "name": "get_upload_session",
+      "request": "GET /v1/upload_sessions/{session_id}",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "idx": "integer",
+        "order_by": "string?",
+        "order_direction": "string?",
+        "page_size": "integer?"
+      },
+      "body": null,
+      "name": "list_attachments",
+      "request": "GET /v1/pages/{idx}/attachments",
+      "response": "Json",
+      "toolset": "attachments"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "idx": "integer",
+        "order_by": "string?",
+        "order_direction": "string?",
+        "page_size": "integer?",
+        "status_filter": "string?"
+      },
+      "body": null,
+      "name": "list_comments",
+      "request": "GET /v1/pages/{idx}/comments",
+      "response": "Json",
+      "toolset": "comments"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "for_cluster": "boolean?",
+        "idx": "integer",
+        "page_size": "integer?",
+        "show_all": "boolean?"
+      },
+      "body": null,
+      "name": "list_page_backlinks",
+      "request": "GET /v1/pages/{idx}/backlinks",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "read",
+      "args": {
+        "actuality": "string?",
+        "cursor": "string?",
+        "include_self": "boolean?",
+        "page_size": "integer?",
+        "show_all": "boolean?",
+        "slug": "string"
+      },
+      "body": null,
+      "name": "list_page_descendants",
+      "request": "GET /v1/pages/descendants",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "actuality": "string?",
+        "cursor": "string?",
+        "idx": "integer",
+        "include_self": "boolean?",
+        "page_size": "integer?",
+        "show_all": "boolean?"
+      },
+      "body": null,
+      "name": "list_page_descendants_by_id",
+      "request": "GET /v1/pages/{idx}/descendants",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "idx": "integer",
+        "order_by": "string?",
+        "order_direction": "string?",
+        "page_size": "integer?"
+      },
+      "body": null,
+      "name": "list_page_grids",
+      "request": "GET /v1/pages/{idx}/grids",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "idx": "integer",
+        "order_by": "string?",
+        "order_direction": "string?",
+        "page_size": "integer?",
+        "q": "string?",
+        "types": "string?"
+      },
+      "body": null,
+      "name": "list_page_resources",
+      "request": "GET /v1/pages/{idx}/resources",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "ids": "string?",
+        "idx": "integer",
+        "page_size": "integer?"
+      },
+      "body": null,
+      "name": "list_page_revisions",
+      "request": "GET /v1/pages/{idx}/revisions",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "read",
+      "args": {
+        "cursor": "string?",
+        "is_personal": "boolean?",
+        "page_size": "integer?",
+        "show_all": "boolean?",
+        "slugs": "string?"
+      },
+      "body": null,
+      "name": "list_spaces",
+      "request": "GET /v1/spaces",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "move_grid_columns",
+      "request": "POST /v1/grids/{idx}/columns/move",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "move_grid_rows",
+      "request": "POST /v1/grids/{idx}/rows/move",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "dry_run": "boolean?"
+      },
+      "body": "Json",
+      "name": "move_page",
+      "request": "POST /v1/pages/move",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "write",
+      "args": {
+        "idx": "string"
+      },
+      "body": null,
+      "name": "recover_page",
+      "request": "POST /v1/recovery_tokens/{idx}/recover",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "remove_grid_columns",
+      "request": "DELETE /v1/grids/{idx}/columns",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "remove_grid_rows",
+      "request": "DELETE /v1/grids/{idx}/rows",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "read",
+      "args": {
+        "body": "object"
+      },
+      "body": "Json",
+      "name": "search",
+      "request": "POST /v1/search",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "read",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "suggest_grid_column",
+      "request": "POST /v1/grids/{idx}/columns/suggest",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "update_grid",
+      "request": "POST /v1/grids/{idx}",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "update_grid_cells",
+      "request": "POST /v1/grids/{idx}/cells",
+      "response": "Json",
+      "toolset": "grids"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "column_slug": "string",
+        "idx": "string"
+      },
+      "body": "Json",
+      "name": "update_grid_column",
+      "request": "POST /v1/grids/{idx}/column/{column_slug}",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "write",
+      "args": {
+        "body": "object",
+        "idx": "string",
+        "row_id": "string"
+      },
+      "body": "Json",
+      "name": "update_grid_row",
+      "request": "POST /v1/grids/{idx}/rows/{row_id}",
+      "response": "Json",
+      "toolset": "extra"
+    },
+    {
+      "access": "write",
+      "args": {
+        "allow_merge": "boolean?",
+        "body": "any",
+        "fields": "string?",
+        "idx": "integer",
+        "is_silent": "boolean?"
+      },
+      "body": "Json",
+      "name": "update_page",
+      "request": "POST /v1/pages/{idx}",
+      "response": "Json",
+      "toolset": "pages"
+    },
+    {
+      "access": "destructive",
+      "args": {
+        "access_id": "string",
+        "body": "object",
+        "idx": "integer",
+        "prevent_selflock": "boolean?"
+      },
+      "body": "Json",
+      "name": "update_page_access",
+      "request": "POST /v1/pages/{idx}/access/{access_id}",
+      "response": "Json",
+      "toolset": "access"
+    },
+    {
+      "access": "write",
+      "args": {
+        "file": "string",
+        "part_number": "integer",
+        "session_id": "string"
+      },
+      "body": "Binary",
+      "name": "upload_file_part",
+      "request": "PUT /v1/upload_sessions/{session_id}/upload_part",
+      "response": "Json",
+      "toolset": "attachments"
+    }
+  ],
+  "toolsets": [
+    {
+      "default_enabled": true,
+      "description": "Страницы: чтение, создание, правка, удаление и восстановление, копирование, подстраницы, поиск, текущий пользователь",
+      "slug": "pages"
+    },
+    {
+      "default_enabled": true,
+      "description": "Вложения страниц и сессии загрузки файлов",
+      "slug": "attachments"
+    },
+    {
+      "default_enabled": true,
+      "description": "Комментарии к страницам",
+      "slug": "comments"
+    },
+    {
+      "default_enabled": true,
+      "description": "Динамические таблицы",
+      "slug": "grids"
+    },
+    {
+      "default_enabled": false,
+      "description": "Персональные права доступа к страницам",
+      "slug": "access"
+    },
+    {
+      "default_enabled": false,
+      "description": "Операции из официальной спецификации, которых нет в справочнике Wiki API",
+      "slug": "extra"
+    }
+  ]
+}

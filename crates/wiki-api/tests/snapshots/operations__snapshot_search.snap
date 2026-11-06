@@ -1,0 +1,225 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"search\"))"
+---
+{
+  "access": "Read",
+  "body": "Json",
+  "description": "Ищет по тексту страниц и файлов Вики: `query` — текст запроса. `filters`: `type` (`page` или `file`), `authors`, `cluster` (slug раздела), `created_at` и `modified_at` (интервалы `from`/`to`), `show_obsolete`. `order_by`: `relevancy`, `creation_date`, `modified_date`. Разбивка на страницы здесь своя: `cursor` — номер страницы выдачи с 1 (до 500), `limit` — до 50 результатов. `highlight=true` выделяет совпадения тегами `<em>`.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/search/search__search",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "body": {
+        "description": "JSON request body.",
+        "properties": {
+          "cursor": {
+            "default": 1,
+            "description": "Курсор для получения страницы выдачи",
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "filters": {
+            "anyOf": [
+              {
+                "properties": {
+                  "authors": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "properties": {
+                            "cloud_uid": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "uid": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "cluster": {
+                    "anyOf": [
+                      {
+                        "maxLength": 255,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "created_at": {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "from": {
+                            "anyOf": [
+                              {
+                                "format": "date-time",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "to": {
+                            "anyOf": [
+                              {
+                                "format": "date-time",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "modified_at": {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "from": {
+                            "anyOf": [
+                              {
+                                "format": "date-time",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "to": {
+                            "anyOf": [
+                              {
+                                "format": "date-time",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "show_obsolete": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "file",
+                          "page"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "highlight": {
+            "default": false,
+            "description": "Обернуть совпадения в теги <em>...<\\em>",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Число результатов на странице выдачи",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "order_by": {
+            "allOf": [
+              {
+                "enum": [
+                  "relevancy",
+                  "creation_date",
+                  "modified_date"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": "relevancy"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "body"
+    ],
+    "type": "object"
+  },
+  "method": "POST",
+  "params": [
+    {
+      "description": "JSON request body.",
+      "location": "Body",
+      "name": "body",
+      "required": true,
+      "value_type": "Object"
+    }
+  ],
+  "path": "/v1/search",
+  "response": "Json",
+  "summary": "Поиск по Вики",
+  "tool_description": "Поиск по Вики\n\nИщет по тексту страниц и файлов Вики: `query` — текст запроса. `filters`: `type` (`page` или `file`), `authors`, `cluster` (slug раздела), `created_at` и `modified_at` (интервалы `from`/`to`), `show_obsolete`. `order_by`: `relevancy`, `creation_date`, `modified_date`. Разбивка на страницы здесь своя: `cursor` — номер страницы выдачи с 1 (до 500), `limit` — до 50 результатов. `highlight=true` выделяет совпадения тегами `<em>`.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/search/search__search",
+  "tool_name": "search",
+  "toolset": "pages",
+  "upstream_operation_id": "wiki_api_b2b_v1_search_views_search_view"
+}

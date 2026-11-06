@@ -1,0 +1,49 @@
+# Build output
+/target/
+*.profraw
+
+# Snapshot review leftovers (insta)
+*.snap.new
+*.pending-snap
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+.envrc
+
+# Logs
+*.log
+
+# Tool caches
+.cache/
+
+# Local agent workspaces
+/.claude/worktrees/
+/.plans/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Signing material (certificates, keys, profiles, base64 dumps)
+*.p12
+*.pfx
+*.p8
+*.cer
+*.crt
+*.pem
+*.key
+*.certSigningRequest
+*.csr
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+AuthKey_*
+*.b64
+*.base64

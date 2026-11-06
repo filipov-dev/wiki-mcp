@@ -1,0 +1,52 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"download_attachment\"))"
+---
+{
+  "access": "Read",
+  "body": null,
+  "description": "Скачивает вложение по числовому id страницы и `file_id` из `list_attachments`. Ответ — содержимое файла.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__download_by_file_id",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "file_id": {
+        "description": "Числовой id вложения на этой странице: поле `id` элемента `results` из ответа `list_attachments`.",
+        "type": "integer"
+      },
+      "idx": {
+        "description": "Числовой id страницы: поле `id` из ответа `get_page`, `get_page_by_id` или `create_page`. Не slug и не URL.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "idx",
+      "file_id"
+    ],
+    "type": "object"
+  },
+  "method": "GET",
+  "params": [
+    {
+      "description": "Числовой id страницы: поле `id` из ответа `get_page`, `get_page_by_id` или `create_page`. Не slug и не URL.",
+      "location": "Path",
+      "name": "idx",
+      "required": true,
+      "value_type": "Integer"
+    },
+    {
+      "description": "Числовой id вложения на этой странице: поле `id` элемента `results` из ответа `list_attachments`.",
+      "location": "Path",
+      "name": "file_id",
+      "required": true,
+      "value_type": "Integer"
+    }
+  ],
+  "path": "/v1/pages/{idx}/attachments/{file_id}/download",
+  "response": "Binary",
+  "summary": "Скачать вложение по id",
+  "tool_description": "Скачать вложение по id\n\nСкачивает вложение по числовому id страницы и `file_id` из `list_attachments`. Ответ — содержимое файла.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/attachments/pagesattachments__download_by_file_id",
+  "tool_name": "download_attachment",
+  "toolset": "attachments",
+  "upstream_operation_id": "wiki_api_v2_public_pages_attachments_views_download_by_file_id_view"
+}

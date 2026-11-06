@@ -1,0 +1,74 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"get_page\"))"
+---
+{
+  "access": "Read",
+  "body": null,
+  "description": "Возвращает страницу по адресу (`slug`). Slug — путь относительно корня Вики, например `team/project`: без домена, протокола и косой черты в начале; полный URL не подходит. По умолчанию приходят только `id`, `slug`, `title` и `page_type`: текст страницы и другие блоки запрашивайте через `fields` (например, `fields=content`). Полученный `id` нужен остальным операциям со страницей как `idx`. Старую версию страницы возвращает `revision_id`. Если у страницы настроен редирект, возвращается сама исходная страница, а не цель: куда она ведёт, видно в блоке `redirect` (`fields=redirect`). С `raise_on_redirect=true` такая страница даёт ошибку 400 `REDIRECT_CHAIN`, в `details` — `source_page` и `target_page`.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__get_page_details",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "fields": {
+        "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+        "type": "string"
+      },
+      "raise_on_redirect": {
+        "default": false,
+        "description": "Если `true` и у страницы настроено перенаправление, вернуть ошибку с данными исходной и целевой страниц вместо самой страницы.",
+        "type": "boolean"
+      },
+      "revision_id": {
+        "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`.",
+        "type": "integer"
+      },
+      "slug": {
+        "description": "Адрес страницы относительно корня Вики, например `team/project`. Передайте slug, а не полный URL; ненормализованный slug приводится к нормализованному виду.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug"
+    ],
+    "type": "object"
+  },
+  "method": "GET",
+  "params": [
+    {
+      "description": "Адрес страницы относительно корня Вики, например `team/project`. Передайте slug, а не полный URL; ненормализованный slug приводится к нормализованному виду.",
+      "location": "Query",
+      "name": "slug",
+      "required": true,
+      "value_type": "String"
+    },
+    {
+      "description": "Если `true` и у страницы настроено перенаправление, вернуть ошибку с данными исходной и целевой страниц вместо самой страницы.",
+      "location": "Query",
+      "name": "raise_on_redirect",
+      "required": false,
+      "value_type": "Boolean"
+    },
+    {
+      "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`.",
+      "location": "Query",
+      "name": "revision_id",
+      "required": false,
+      "value_type": "Integer"
+    },
+    {
+      "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+      "location": "Query",
+      "name": "fields",
+      "required": false,
+      "value_type": "String"
+    }
+  ],
+  "path": "/v1/pages",
+  "response": "Json",
+  "summary": "Получить страницу по адресу",
+  "tool_description": "Получить страницу по адресу\n\nВозвращает страницу по адресу (`slug`). Slug — путь относительно корня Вики, например `team/project`: без домена, протокола и косой черты в начале; полный URL не подходит. По умолчанию приходят только `id`, `slug`, `title` и `page_type`: текст страницы и другие блоки запрашивайте через `fields` (например, `fields=content`). Полученный `id` нужен остальным операциям со страницей как `idx`. Старую версию страницы возвращает `revision_id`. Если у страницы настроен редирект, возвращается сама исходная страница, а не цель: куда она ведёт, видно в блоке `redirect` (`fields=redirect`). С `raise_on_redirect=true` такая страница даёт ошибку 400 `REDIRECT_CHAIN`, в `details` — `source_page` и `target_page`.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/pages/pages__get_page_details",
+  "tool_name": "get_page",
+  "toolset": "pages",
+  "upstream_operation_id": "wiki_api_v2_public_pages_page_details_view_get_page_details_view"
+}

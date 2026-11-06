@@ -1,0 +1,127 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"create_page\"))"
+---
+{
+  "access": "Write",
+  "body": "Json",
+  "description": "Создаёт страницу по адресу `slug` с названием `title` и необязательным исходным текстом `content` в разметке Вики. Если адрес занят, вернётся ошибка. `access_policy` задаёт режим доступа: `inherited` (как у родительской страницы), `all_staff` (всем сотрудникам, роль в `all_staff_role`) или `custom` (персональные доступы). В ответе — параметры новой страницы; её `id` передавайте как `idx` в другие операции.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__create_page",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "body": {
+        "description": "JSON request body.",
+        "properties": {
+          "access_policy": {
+            "anyOf": [
+              {
+                "properties": {
+                  "access_type": {
+                    "enum": [
+                      "inherited",
+                      "all_staff",
+                      "custom"
+                    ],
+                    "type": "string"
+                  },
+                  "all_staff_role": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "reader",
+                          "editor",
+                          "extra_editor"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Роль для доступа \"всем штатным сотрудникам\" (временно доступна только роль editor)"
+                  }
+                },
+                "required": [
+                  "access_type"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Настройки доступа к странице"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "slug"
+        ],
+        "type": "object"
+      },
+      "fields": {
+        "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+        "type": "string"
+      },
+      "is_silent": {
+        "default": false,
+        "description": "Если `true`, не отправлять подписчикам уведомление об изменении.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "body"
+    ],
+    "type": "object"
+  },
+  "method": "POST",
+  "params": [
+    {
+      "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+      "location": "Query",
+      "name": "fields",
+      "required": false,
+      "value_type": "String"
+    },
+    {
+      "description": "Если `true`, не отправлять подписчикам уведомление об изменении.",
+      "location": "Query",
+      "name": "is_silent",
+      "required": false,
+      "value_type": "Boolean"
+    },
+    {
+      "description": "JSON request body.",
+      "location": "Body",
+      "name": "body",
+      "required": true,
+      "value_type": "Object"
+    }
+  ],
+  "path": "/v1/pages",
+  "response": "Json",
+  "summary": "Создать страницу",
+  "tool_description": "Создать страницу\n\nСоздаёт страницу по адресу `slug` с названием `title` и необязательным исходным текстом `content` в разметке Вики. Если адрес занят, вернётся ошибка. `access_policy` задаёт режим доступа: `inherited` (как у родительской страницы), `all_staff` (всем сотрудникам, роль в `all_staff_role`) или `custom` (персональные доступы). В ответе — параметры новой страницы; её `id` передавайте как `idx` в другие операции.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/pages/pages__create_page",
+  "tool_name": "create_page",
+  "toolset": "pages",
+  "upstream_operation_id": "wiki_api_b2b_v1_pages_page_create_view_create_page_view"
+}

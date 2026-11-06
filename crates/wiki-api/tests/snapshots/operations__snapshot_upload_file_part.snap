@@ -1,0 +1,67 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"upload_file_part\"))"
+---
+{
+  "access": "Write",
+  "body": "Binary",
+  "description": "Загружает часть файла в сессию: тело — байты части (`application/octet-stream`), `part_number` — номер части от 1 до 10000. Файл до 16 МиБ передавайте одной частью с `part_number=1`. Больший файл режьте на части по 5–16 МиБ и нумеруйте подряд с 1; меньше 5 МиБ может быть только последняя часть. Части можно загружать параллельно и повторять при ошибке. Если `storage_type` сессии не `s3` и не `custom_s3` (загрузка через сервис загрузки файлов), передайте файл целиком одним запросом: размер должен совпасть с `file_size`. После всех частей вызовите `finish_upload_session`.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__upload_part",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "file": {
+        "description": "Байты части файла. Абсолютный путь к локальному файлу: сервер читает его и отправляет содержимое сырым телом запроса (application/octet-stream). Файл не пустой и не больше 16 МиБ.",
+        "type": "string"
+      },
+      "part_number": {
+        "description": "Номер части от 1 до 10000. Для файла целиком — 1; части нумеруйте подряд с 1.",
+        "maximum": 10000,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "session_id": {
+        "description": "Идентификатор сессии загрузки (UUID): поле `session_id` из ответа `create_upload_session`.",
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "part_number",
+      "file"
+    ],
+    "type": "object"
+  },
+  "method": "PUT",
+  "params": [
+    {
+      "description": "Идентификатор сессии загрузки (UUID): поле `session_id` из ответа `create_upload_session`.",
+      "location": "Path",
+      "name": "session_id",
+      "required": true,
+      "value_type": "String"
+    },
+    {
+      "description": "Номер части от 1 до 10000. Для файла целиком — 1; части нумеруйте подряд с 1.",
+      "location": "Query",
+      "name": "part_number",
+      "required": true,
+      "value_type": "Integer"
+    },
+    {
+      "description": "Байты части файла. Абсолютный путь к локальному файлу: сервер читает его и отправляет содержимое сырым телом запроса (application/octet-stream). Файл не пустой и не больше 16 МиБ.",
+      "location": "Body",
+      "name": "file",
+      "required": true,
+      "value_type": "File"
+    }
+  ],
+  "path": "/v1/upload_sessions/{session_id}/upload_part",
+  "response": "Json",
+  "summary": "Загрузить часть файла",
+  "tool_description": "Загрузить часть файла\n\nЗагружает часть файла в сессию: тело — байты части (`application/octet-stream`), `part_number` — номер части от 1 до 10000. Файл до 16 МиБ передавайте одной частью с `part_number=1`. Больший файл режьте на части по 5–16 МиБ и нумеруйте подряд с 1; меньше 5 МиБ может быть только последняя часть. Части можно загружать параллельно и повторять при ошибке. Если `storage_type` сессии не `s3` и не `custom_s3` (загрузка через сервис загрузки файлов), передайте файл целиком одним запросом: размер должен совпасть с `file_size`. После всех частей вызовите `finish_upload_session`.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/upload_sessions/upload_sessions__upload_part",
+  "tool_name": "upload_file_part",
+  "toolset": "attachments",
+  "upstream_operation_id": "wiki_api_v2_public_upload_sessions_views_upload_part_view"
+}

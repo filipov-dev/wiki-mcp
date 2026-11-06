@@ -1,0 +1,104 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"list_page_descendants\"))"
+---
+{
+  "access": "Read",
+  "body": null,
+  "description": "Возвращает подстраницы всех уровней по адресу (`slug`) страницы; пустой `slug` — страницы от корня Вики. Выдача постраничная: следующую страницу запрашивайте с `cursor` из `next_cursor`, пока он не станет null.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__descendants_by_slug",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "actuality": {
+        "description": "Только актуальные (`actual`) или только устаревшие (`obsolete`) страницы.",
+        "enum": [
+          "actual",
+          "obsolete"
+        ],
+        "type": "string"
+      },
+      "cursor": {
+        "description": "Курсор страницы выдачи: `next_cursor` (или `prev_cursor`) из предыдущего ответа. Без параметра возвращается первая страница.",
+        "type": "string"
+      },
+      "include_self": {
+        "default": false,
+        "description": "Если `true`, включить в ответ и саму страницу.",
+        "type": "boolean"
+      },
+      "page_size": {
+        "default": 50,
+        "description": "Число результатов на странице выдачи. Ответ может содержать меньше; выдача закончилась, когда `next_cursor` равен null.",
+        "maximum": 100,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "show_all": {
+        "default": false,
+        "description": "Если `true`, администратор организации или пространства получает все подстраницы, включая недоступные ему по обычным правам. От корня Вики режим доступен только администратору организации.",
+        "type": "boolean"
+      },
+      "slug": {
+        "description": "Адрес страницы относительно корня Вики, например `team/project` (не полный URL). Пустая строка — страницы от корня Вики.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug"
+    ],
+    "type": "object"
+  },
+  "method": "GET",
+  "params": [
+    {
+      "description": "Адрес страницы относительно корня Вики, например `team/project` (не полный URL). Пустая строка — страницы от корня Вики.",
+      "location": "Query",
+      "name": "slug",
+      "required": true,
+      "value_type": "String"
+    },
+    {
+      "description": "Если `true`, включить в ответ и саму страницу.",
+      "location": "Query",
+      "name": "include_self",
+      "required": false,
+      "value_type": "Boolean"
+    },
+    {
+      "description": "Только актуальные (`actual`) или только устаревшие (`obsolete`) страницы.",
+      "location": "Query",
+      "name": "actuality",
+      "required": false,
+      "value_type": "String"
+    },
+    {
+      "description": "Число результатов на странице выдачи. Ответ может содержать меньше; выдача закончилась, когда `next_cursor` равен null.",
+      "location": "Query",
+      "name": "page_size",
+      "required": false,
+      "value_type": "Integer"
+    },
+    {
+      "description": "Курсор страницы выдачи: `next_cursor` (или `prev_cursor`) из предыдущего ответа. Без параметра возвращается первая страница.",
+      "location": "Query",
+      "name": "cursor",
+      "required": false,
+      "value_type": "String"
+    },
+    {
+      "description": "Если `true`, администратор организации или пространства получает все подстраницы, включая недоступные ему по обычным правам. От корня Вики режим доступен только администратору организации.",
+      "location": "Query",
+      "name": "show_all",
+      "required": false,
+      "value_type": "Boolean"
+    }
+  ],
+  "path": "/v1/pages/descendants",
+  "response": "Json",
+  "summary": "Подстраницы по адресу страницы",
+  "tool_description": "Подстраницы по адресу страницы\n\nВозвращает подстраницы всех уровней по адресу (`slug`) страницы; пустой `slug` — страницы от корня Вики. Выдача постраничная: следующую страницу запрашивайте с `cursor` из `next_cursor`, пока он не станет null.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/pages/pages__descendants_by_slug",
+  "tool_name": "list_page_descendants",
+  "toolset": "pages",
+  "upstream_operation_id": "wiki_api_b2b_v1_pages_descendants_view_descendants_by_slug_view"
+}

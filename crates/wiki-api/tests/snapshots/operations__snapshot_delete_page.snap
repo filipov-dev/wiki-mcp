@@ -1,0 +1,52 @@
+---
+source: crates/wiki-api/tests/operations.rs
+expression: "snapshot_view(op(\"delete_page\"))"
+---
+{
+  "access": "Destructive",
+  "body": null,
+  "description": "Удаляет страницу; с `recursive=true` — вместе со всеми подстраницами (нужны права на удаление каждой, число подстраниц ограничено). Ответ содержит `recovery_token`: сохраните его, по нему `recover_page` восстанавливает страницу.",
+  "docs_url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__delete_page",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "idx": {
+        "description": "Числовой id страницы: поле `id` из ответа `get_page`, `get_page_by_id` или `create_page`. Не slug и не URL.",
+        "type": "integer"
+      },
+      "recursive": {
+        "default": false,
+        "description": "Если `true`, удалить страницу вместе со всеми подстраницами. Нужны права на удаление всех подстраниц; их число ограничено.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "idx"
+    ],
+    "type": "object"
+  },
+  "method": "DELETE",
+  "params": [
+    {
+      "description": "Числовой id страницы: поле `id` из ответа `get_page`, `get_page_by_id` или `create_page`. Не slug и не URL.",
+      "location": "Path",
+      "name": "idx",
+      "required": true,
+      "value_type": "Integer"
+    },
+    {
+      "description": "Если `true`, удалить страницу вместе со всеми подстраницами. Нужны права на удаление всех подстраниц; их число ограничено.",
+      "location": "Query",
+      "name": "recursive",
+      "required": false,
+      "value_type": "Boolean"
+    }
+  ],
+  "path": "/v1/pages/{idx}",
+  "response": "Json",
+  "summary": "Удалить страницу",
+  "tool_description": "Удалить страницу\n\nУдаляет страницу; с `recursive=true` — вместе со всеми подстраницами (нужны права на удаление каждой, число подстраниц ограничено). Ответ содержит `recovery_token`: сохраните его, по нему `recover_page` восстанавливает страницу.\n\nReference: https://yandex.ru/support/wiki/ru/api-ref/pages/pages__delete_page",
+  "tool_name": "delete_page",
+  "toolset": "pages",
+  "upstream_operation_id": "wiki_api_b2b_v1_pages_page_delete_view_delete_page_view"
+}
