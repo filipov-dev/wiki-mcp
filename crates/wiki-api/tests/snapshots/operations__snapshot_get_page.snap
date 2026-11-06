@@ -11,7 +11,7 @@ expression: "snapshot_view(op(\"get_page\"))"
     "additionalProperties": false,
     "properties": {
       "fields": {
-        "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+        "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
         "type": "string"
       },
       "raise_on_redirect": {
@@ -20,7 +20,7 @@ expression: "snapshot_view(op(\"get_page\"))"
         "type": "boolean"
       },
       "revision_id": {
-        "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`.",
+        "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия. Id версий — в `list_page_revisions` (набор `extra`), первая в списке — текущая.",
         "type": "integer"
       },
       "slug": {
@@ -50,14 +50,14 @@ expression: "snapshot_view(op(\"get_page\"))"
       "value_type": "Boolean"
     },
     {
-      "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`.",
+      "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия. Id версий — в `list_page_revisions` (набор `extra`), первая в списке — текущая.",
       "location": "Query",
       "name": "revision_id",
       "required": false,
       "value_type": "Integer"
     },
     {
-      "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
+      "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`.",
       "location": "Query",
       "name": "fields",
       "required": false,

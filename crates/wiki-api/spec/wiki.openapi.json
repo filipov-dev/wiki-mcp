@@ -47,7 +47,7 @@
               "title": "Revision Id"
             },
             "required": false,
-            "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`."
+            "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия. Id версий — в `list_page_revisions` (набор `extra`), первая в списке — текущая."
           },
           {
             "in": "query",
@@ -64,7 +64,7 @@
               "title": "Fields"
             },
             "required": false,
-            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
+            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
           }
         ],
         "responses": {
@@ -108,7 +108,7 @@
               "title": "Fields"
             },
             "required": false,
-            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
+            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
           },
           {
             "in": "query",
@@ -197,7 +197,7 @@
               "title": "Revision Id"
             },
             "required": false,
-            "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия; её id приходит в поле `last_revision_id` при `fields=last_revision_id`."
+            "description": "Id версии страницы, которую нужно получить. Без параметра — текущая версия. Id версий — в `list_page_revisions` (набор `extra`), первая в списке — текущая."
           },
           {
             "in": "query",
@@ -214,7 +214,7 @@
               "title": "Fields"
             },
             "required": false,
-            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
+            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
           }
         ],
         "responses": {
@@ -262,7 +262,7 @@
               "type": "string"
             },
             "required": false,
-            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
+            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
           },
           {
             "in": "query",
@@ -316,7 +316,7 @@
         },
         "x-upstream-operation-id": "wiki_api_b2b_v1_pages_page_update_view_update_page_details_view",
         "x-access-level": "write",
-        "description": "Изменяет страницу: название (`title`), исходный текст (`content` заменяет весь текст страницы), перенаправление (`redirect`), владельца (`owner`), режим доступа (`access_policy`), актуальность (`actuality`). Передавайте только поля, которые меняются. Чтобы не затереть чужие правки, передайте `revision` — версию, на которой основано изменение: при несовпадении вернётся конфликт, а `allow_merge=true` включает трёхстороннее слияние. Чтобы дописать текст без замены, используйте `append_page_content`.",
+        "description": "Изменяет страницу: название (`title`), исходный текст (`content` заменяет весь текст страницы), перенаправление (`redirect`), владельца (`owner`), режим доступа (`access_policy`), актуальность (`actuality`). Передавайте только поля, которые меняются. Чтобы не затереть чужие правки, передайте `revision` — id версии, на которой основано изменение (на wysiwyg-страницах API его не проверяет и конфликта не возвращает), `allow_merge=true` — трёхстороннее слияние. Чтобы дописать текст без замены, используйте `append_page_content`.",
         "externalDocs": {
           "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__update_page_details"
         }
@@ -604,7 +604,7 @@
               "title": "Fields"
             },
             "required": false,
-            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `last_revision_id`. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
+            "description": "Дополнительные блоки ответа через запятую: `content`, `attributes`, `breadcrumbs`, `redirect`, `owner`, `access_policy`, `access_lists`, `actuality`. Других блоков нет: неизвестное имя даёт 400. Без параметра возвращаются только `id`, `slug`, `title` и `page_type`."
           },
           {
             "in": "query",
@@ -646,7 +646,7 @@
         },
         "x-upstream-operation-id": "wiki_api_v2_public_pages_page_append_content_view_append_content_view",
         "x-access-level": "write",
-        "description": "Добавляет текст `content` на страницу, не заменяя существующий. Место вставки — ровно одно из полей: `body.location` (`top` — начало, `bottom` — конец страницы), `section` (`id` раздела и `location`: `top` — после заголовка раздела, `bottom` — в конце раздела; разделы нумеруются с 1 по порядку всех заголовков страницы, включая заголовок первого уровня, и раздел продолжается до следующего заголовка того же или более высокого уровня — поэтому раздел заголовка `#` охватывает всю страницу под ним) или `anchor` (`name` якоря; `fallback=true` — вставить в конец страницы, если якоря нет; `regex=true` — искать якорь регулярным выражением по исходному тексту). `revision` включает проверку версии: при несовпадении вернётся конфликт. Так же на страницу вставляют таблицу (`{% wgrid id=\"<UUID>\" %}`) и прикреплённый файл (`{% file src=\"<download_url>\" name=\"<имя>\" %}`). На страницах нового редактора (`wysiwyg`) якоря `{#имя}` в заголовках, блоки `{{anchor}}` и HTML-якоря через `anchor` не находятся (ошибка 400 `ANCHOR_NOT_FOUND`): вставляйте через `section` или `body`, а `anchor` — только с `fallback=true`.",
+        "description": "Добавляет текст `content` на страницу, не заменяя существующий. Место вставки — ровно одно из полей: `body.location` (`top` — начало, `bottom` — конец страницы), `section` (`id` раздела и `location`: `top` — после заголовка раздела, `bottom` — в конце раздела; разделы нумеруются с 1 по порядку всех заголовков страницы, включая заголовок первого уровня, и раздел продолжается до следующего заголовка того же или более высокого уровня — поэтому раздел заголовка `#` охватывает всю страницу под ним) или `anchor` (`name` якоря; `fallback=true` — вставить в конец страницы, если якоря нет; `regex=true` — искать якорь регулярным выражением по исходному тексту). `revision` — id версии, на которой основано изменение; на wysiwyg-страницах API его не проверяет. Так же на страницу вставляют таблицу (`{% wgrid id=\"<UUID>\" %}`) и прикреплённый файл (`{% file src=\"<download_url>\" name=\"<имя>\" %}`). На страницах нового редактора (`wysiwyg`) якоря `{#имя}` в заголовках, блоки `{{anchor}}` и HTML-якоря через `anchor` не находятся (ошибка 400 `ANCHOR_NOT_FOUND`): вставляйте через `section` или `body`, а `anchor` — только с `fallback=true`.",
         "externalDocs": {
           "url": "https://yandex.ru/support/wiki/ru/api-ref/pages/pages__append_content"
         }
@@ -8345,7 +8345,7 @@
             "properties": {
               "revision": {
                 "type": "string",
-                "description": "Версия страницы, на которой основано изменение. Если страницу успели изменить, вернётся ошибка конфликта."
+                "description": "Id версии страницы, на которой основано изменение (первая запись `list_page_revisions`). На страницах нового редактора (wysiwyg) API номер не проверяет: устаревшая версия принимается без конфликта, поэтому перед правкой перечитывайте страницу."
               }
             }
           }
@@ -8363,7 +8363,7 @@
             "properties": {
               "revision": {
                 "type": "string",
-                "description": "Версия страницы, на которой основано изменение. Если страницу успели изменить, вернётся ошибка конфликта."
+                "description": "Id версии страницы, на которой основано изменение (первая запись `list_page_revisions`). На страницах нового редактора (wysiwyg) API номер не проверяет: устаревшая версия принимается без конфликта, поэтому перед правкой перечитывайте страницу."
               }
             }
           }

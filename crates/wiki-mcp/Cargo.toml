@@ -24,8 +24,8 @@ toml = "1.2.0"
 toml_edit = "0.25.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "std"] }
-wiki-api = { version = "0.1.0", path = "../wiki-api" }
-wiki-mcp-core = { version = "0.1.0", path = "../wiki-mcp-core" }
+wiki-api = { version = "0.1.1", path = "../wiki-api" }
+wiki-mcp-core = { version = "0.1.1", path = "../wiki-mcp-core" }
 
 [lints]
 workspace = true

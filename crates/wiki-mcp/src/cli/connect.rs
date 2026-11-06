@@ -11,11 +11,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow};
 use clap::Args;
 use wiki_api::Organization;
 use wiki_api::auth::{AuthError, KeyringStore, TokenStore};
-use wiki_api::spec::{find_toolset, toolsets};
+use wiki_mcp_core::toolsets;
 
 use crate::browser::{BrowserDecision, BrowserEnv, decide};
 use crate::clients::claude::{self, CommandRunner, SystemRunner};
@@ -60,8 +60,8 @@ pub struct ConnectArgs {
     /// Allow tools that delete data in Wiki (implies --allow-write).
     #[arg(long)]
     pub allow_destructive: bool,
-    /// Comma-separated toolsets to enable (passed to `serve --toolsets`). Default: the
-    /// default set of `serve`.
+    /// Comma-separated toolsets to enable, or `all` (passed to `serve --toolsets`).
+    /// Default: the default set of `serve`.
     #[arg(long, value_delimiter = ',', value_name = "TOOLSET,...")]
     pub toolsets: Vec<String>,
     /// ClientID of your Yandex OAuth application (32 hex characters). Saved in the profile.
@@ -120,21 +120,19 @@ pub struct ConnectEnv<'a, V> {
     pub browser: BrowserDecision,
 }
 
-/// Наборы инструментов из флага: без пустых и повторов, только известные slug.
+/// Наборы инструментов из флага: проверяются той же функцией, что и в `serve`.
+///
+/// `all` сохраняется как есть, а не раскрывается в текущий список: так наборы, которые
+/// появятся в новых версиях, включатся без повторного `connect`.
 fn normalize_toolsets(values: &[String]) -> anyhow::Result<Vec<String>> {
-    let mut result: Vec<String> = Vec::new();
-    for value in values {
-        let slug = value.trim();
-        if slug.is_empty() || result.iter().any(|known| known == slug) {
-            continue;
-        }
-        if find_toolset(slug).is_none() {
-            let known: Vec<&str> = toolsets().iter().map(|toolset| toolset.slug).collect();
-            bail!("unknown toolset `{slug}`; available: {}", known.join(", "));
-        }
-        result.push(slug.to_owned());
+    let names = toolsets::normalize_toolsets(values).map_err(|err| anyhow!(err))?;
+    if values
+        .iter()
+        .any(|value| value.trim() == toolsets::ALL_TOOLSETS)
+    {
+        return Ok(vec![toolsets::ALL_TOOLSETS.to_owned()]);
     }
-    Ok(result)
+    Ok(names)
 }
 
 /// OAuth-приложение, уже сохранённое в другом профиле: `connect` для следующего агента
@@ -802,6 +800,35 @@ mod tests {
         assert!(err.to_string().contains("broken"), "{err}");
         assert!(fx.ui.output.is_empty());
         assert!(fx.ui.questions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn toolsets_all_is_kept_for_serve() {
+        let mut fx = Fixture::new();
+        fx.answers(&[CLIENT_ID, "1", "42", "y"]);
+        fx.tokens(&["good-token"]);
+        let mut args = args(ClientKind::Codex);
+        args.allow_destructive = true;
+        args.toolsets = vec!["pages".into(), " all ".into()];
+
+        fx.connect(&args).await.unwrap();
+
+        let settings = fx.repo.get("codex").unwrap().unwrap();
+        assert!(settings.allow_destructive);
+        assert_eq!(settings.toolsets, ["all"]);
+        let config = fx.codex_config().unwrap();
+        assert!(
+            config.contains(&toml_args(&[
+                "serve",
+                "--profile",
+                "codex",
+                "--allow-write",
+                "--allow-destructive",
+                "--toolsets",
+                "all"
+            ])),
+            "{config}"
+        );
     }
 
     #[tokio::test]

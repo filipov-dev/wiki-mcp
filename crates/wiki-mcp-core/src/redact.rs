@@ -12,7 +12,7 @@
 //! 1. **Поля по имени** ([`is_credential_key`]): строковое значение поля, имя которого похоже
 //!    на пароль, токен, ключ или заголовок авторизации ([`CREDENTIAL_KEYS`]), на любой
 //!    глубине. Исключения: идентификаторы постраничной выдачи (`next_cursor`, `page_token`),
-//!    признаки (`has_password`, `is_secret`) и пустые строки.
+//!    `recovery_token` удалённой страницы, признаки (`has_password`, `is_secret`) и пустые строки.
 //! 2. **Значения по форме** ([`redact_secret_values`]) в любой строке: OAuth-токены Яндекса
 //!    (`y0_…`, `AQAAAA…`), IAM-токены (`t1.…`), JWT, значения `OAuth …`, `Bearer …` и
 //!    `Basic …`, блоки закрытых ключей PEM и пароли в URL (`https://user:пароль@host`).
@@ -60,8 +60,9 @@ pub const CREDENTIAL_KEYS: &[&str] = &[
 ];
 
 /// Суффиксы имён, которые совпадают с [`CREDENTIAL_KEYS`], но не являются учётными данными:
-/// идентификаторы постраничной выдачи нужны агенту для следующей страницы.
-const NOT_CREDENTIAL_SUFFIXES: &[&str] = &["page_token", "next_token"];
+/// идентификаторы постраничной выдачи нужны агенту для следующей страницы, а
+/// `recovery_token` из ответа `delete_page` — UUID удалённой страницы для `recover_page`.
+const NOT_CREDENTIAL_SUFFIXES: &[&str] = &["page_token", "next_token", "recovery_token"];
 
 /// Поля постраничной выдачи: их значения не проверяются и по форме (правило 2).
 const PAGINATION_SUFFIXES: &[&str] = &["cursor", "page_token", "next_token"];
@@ -512,6 +513,8 @@ mod tests {
             "isSecret",
             "next_page_token",
             "nextToken",
+            "recovery_token",
+            "recoveryToken",
             "next_cursor",
             "tokens_count",
             "token_type",
