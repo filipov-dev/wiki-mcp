@@ -1,22 +1,35 @@
 //! Реестр MCP-инструментов сервера.
 //!
-//! Строится один раз при запуске из `wiki_api::spec::operations()` с учётом
-//! [`ServerOptions`]: инструменты выше `max_access` и вне включённых наборов не регистрируются,
-//! поэтому не видны в `tools/list` и не вызываются. Для незарегистрированных, но известных
-//! инструментов [`ToolRegistry::unavailable_reason`] объясняет, какой флаг их включает.
+//! Строится при запуске из `wiki_api::spec::operations()` с учётом [`ServerOptions`]:
+//! инструменты выше `max_access` и вне включённых наборов не регистрируются, поэтому не видны
+//! в `tools/list` и не вызываются. Для незарегистрированных, но известных инструментов
+//! [`ToolRegistry::unavailable_reason`] объясняет, какой флаг их включает.
 //!
 //! Без [`ServerOptions::local_machine`] (HTTP-режим) не регистрируются операции с локальными
 //! файлами: сырое тело из файла (загрузка части файла) и двоичный ответ (скачивание вложений).
 //!
-//! Схема аргументов инструмента — `input_schema` операции; у операций с двоичным ответом
-//! добавляется обязательный аргумент `save_to` (куда сохранить файл). Описание —
+//! Схема аргументов инструмента — `input_schema` операции и два добавления: необязательный
+//! фильтр ответа `jq` ([`crate::jq`]) у операций с JSON-ответом и обязательный аргумент
+//! `save_to` (куда сохранить файл) у операций с двоичным ответом. Описание —
 //! [`OperationDef::tool_description`], пояснения про файлы и уровень доступа.
 //!
 //! Составные инструменты ([`crate::composite`]) регистрируются после операций по тем же
-//! правилам: уровень доступа, набор и локальные файлы.
+//! правилам: уровень доступа, набор и локальные файлы. Одноразовый адрес загрузки
+//! ([`crate::CREATE_UPLOAD_URL_TOOL`]), наоборот, регистрируется только в HTTP-режиме.
 //!
 //! Встроенные инструменты [`crate::API_REQUEST_TOOL`] и [`crate::API_SEARCH_TOOL`] регистрируются всегда:
 //! первый сам проверяет уровень доступа каждого запроса, второй только читает таблицу операций.
+//!
+//! Пользовательские инструменты ([`crate::custom_tools`]) регистрируются по уровню доступа
+//! своей операции, без учёта наборов (и в динамическом режиме — сразу при запуске); в
+//! HTTP-режиме — только если операция не работает с локальными файлами. Совпадение имени со
+//! встроенным инструментом — ошибка запуска.
+//!
+//! В режиме динамических наборов ([`ServerOptions::dynamic_toolsets`]) реестр — снимок для
+//! текущего списка включённых наборов: сервер пересобирает его через
+//! [`ToolRegistry::with_toolsets`] при `enable_toolset`/`disable_toolset`. Пустой список
+//! в этом режиме означает «ни одного набора», а не наборы по умолчанию. Составные инструменты
+//! включаются вместе со своим набором, как операции.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,8 +42,13 @@ use crate::ServerOptions;
 use crate::api_request::api_request_tool;
 use crate::api_search::api_search_tool;
 use crate::composite::Composite;
+use crate::custom_tools::check_names;
+use crate::dynamic_toolsets::{
+    ENABLE_TOOLSET_TOOL, disable_toolset_tool, enable_toolset_tool, list_toolsets_tool,
+};
+use crate::jq::{JQ_ARG, add_jq_argument, takes_jq};
 use crate::request::{SAVE_TO_ARG, takes_save_to};
-use crate::toolsets::effective_toolsets;
+use crate::toolsets::{effective_toolsets, normalize_toolsets};
 
 /// Что выполняет инструмент.
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +61,14 @@ pub enum ToolKind {
     ApiRequest,
     /// Поиск по операциям API ([`crate::API_SEARCH_TOOL`]).
     ApiSearch,
+    /// Пользовательский инструмент: индекс в `ServerOptions::custom_tools`.
+    Custom(usize),
+    /// `list_toolsets`: наборы инструментов и какие из них включены (динамический режим).
+    ListToolsets,
+    /// `enable_toolset`: включить набор (динамический режим).
+    EnableToolset,
+    /// `disable_toolset`: выключить набор (динамический режим).
+    DisableToolset,
 }
 
 /// Зарегистрированный инструмент: описание для `tools/list` и обработчик.
@@ -64,6 +90,13 @@ pub struct ToolRegistry {
     max_access: AccessLevel,
     /// Инструменты могут работать с локальными файлами ([`ServerOptions::local_machine`]).
     local_files: bool,
+    /// Режим динамических наборов ([`ServerOptions::dynamic_toolsets`]).
+    dynamic: bool,
+    /// Зарегистрированные пользовательские инструменты. Наборы их не ограничивают, поэтому
+    /// при пересборке реестра (`with_toolsets`) они переносятся как есть.
+    custom: Vec<RegisteredTool>,
+    /// Пользовательские инструменты, которые не зарегистрированы: имя → причина для агента.
+    disabled_custom: HashMap<String, String>,
 }
 
 /// Работает ли инструмент операции с локальными файлами: сырое тело из файла или
@@ -77,20 +110,93 @@ pub fn uses_local_files(op: &OperationDef) -> bool {
 }
 
 impl ToolRegistry {
-    /// Строит реестр. Ошибка — неизвестный набор инструментов или некорректная схема
-    /// в сгенерированной таблице (последнее — ошибка генератора).
+    /// Строит реестр. Ошибка — неизвестный набор инструментов, конфликт имён
+    /// пользовательских инструментов или некорректная схема в сгенерированной таблице
+    /// (последнее — ошибка генератора).
     pub fn new(options: &ServerOptions) -> Result<Self, String> {
         let selected = match &options.toolsets {
-            Some(names) => Some(crate::toolsets::normalize_toolsets(names)?),
+            Some(names) => Some(normalize_toolsets(names)?),
             None => None,
         };
-        let mut registry = Self {
+        let toolsets = if options.dynamic_toolsets {
+            selected.unwrap_or_default()
+        } else {
+            effective_toolsets(selected.as_deref())
+        };
+        check_names(&options.custom_tools)?;
+        let mut custom = Vec::new();
+        let mut disabled_custom = HashMap::new();
+        for (index, tool) in options.custom_tools.iter().enumerate() {
+            let op = tool.operation;
+            if !options.local_machine && uses_local_files(op) {
+                disabled_custom.insert(
+                    tool.name.clone(),
+                    format!(
+                        "custom tool `{}` is not available on this server: its operation `{}` \
+                         reads or writes a local file, and this server runs on another machine \
+                         (HTTP mode)",
+                        tool.name, op.tool_name
+                    ),
+                );
+            } else if !options.max_access.allows(op.access) {
+                disabled_custom.insert(
+                    tool.name.clone(),
+                    format!(
+                        "custom tool `{}` is disabled: it {} data in Wiki and the server runs \
+                         with {} access. Ask the user to restart the server with {} if this is \
+                         intended",
+                        tool.name,
+                        access_verb(op.access),
+                        access_name(options.max_access),
+                        access_flag(op.access),
+                    ),
+                );
+            } else {
+                custom.push(RegisteredTool {
+                    tool: tool.tool()?,
+                    kind: ToolKind::Custom(index),
+                    access: op.access,
+                });
+            }
+        }
+        Self {
             tools: Vec::new(),
             index: HashMap::new(),
-            toolsets: effective_toolsets(selected.as_deref()),
+            toolsets,
             max_access: options.max_access,
             local_files: options.local_machine,
-        };
+            dynamic: options.dynamic_toolsets,
+            custom,
+            disabled_custom,
+        }
+        .populate()
+    }
+
+    /// Тот же реестр с другим списком включённых наборов (динамический режим).
+    /// Ошибка — неизвестный набор.
+    pub fn with_toolsets(&self, toolsets: &[String]) -> Result<Self, String> {
+        let toolsets = normalize_toolsets(toolsets)?;
+        Self {
+            tools: Vec::new(),
+            index: HashMap::new(),
+            toolsets: if self.dynamic {
+                toolsets
+            } else {
+                effective_toolsets(Some(&toolsets))
+            },
+            max_access: self.max_access,
+            local_files: self.local_files,
+            dynamic: self.dynamic,
+            custom: self.custom.clone(),
+            disabled_custom: self.disabled_custom.clone(),
+        }
+        .populate()
+    }
+
+    /// Заполняет пустой реестр инструментами по его настройкам.
+    fn populate(self) -> Result<Self, String> {
+        let mut registry = self;
+        let max_access = registry.max_access;
         for op in operations() {
             if registry.operation_enabled(op) {
                 let tool = operation_tool(op)?;
@@ -111,15 +217,35 @@ impl ToolRegistry {
             }
         }
         registry.push(RegisteredTool {
-            tool: api_request_tool(options.max_access, options.local_machine),
+            tool: api_request_tool(max_access, registry.local_files),
             kind: ToolKind::ApiRequest,
-            access: options.max_access,
+            access: max_access,
         })?;
         registry.push(RegisteredTool {
             tool: api_search_tool(),
             kind: ToolKind::ApiSearch,
             access: AccessLevel::Read,
         })?;
+        if registry.dynamic {
+            // Управление наборами меняет только список инструментов этого сервера,
+            // данных Wiki не касается — уровень чтения.
+            for (tool, kind) in [
+                (list_toolsets_tool(), ToolKind::ListToolsets),
+                (enable_toolset_tool(), ToolKind::EnableToolset),
+                (disable_toolset_tool(), ToolKind::DisableToolset),
+            ] {
+                registry.push(RegisteredTool {
+                    tool,
+                    kind,
+                    access: AccessLevel::Read,
+                })?;
+            }
+        }
+        // Пользовательские инструменты пользователь настроил явно: они регистрируются
+        // всегда, в том числе в динамическом режиме, и не входят ни в один набор.
+        for tool in registry.custom.clone() {
+            registry.push(tool)?;
+        }
         Ok(registry)
     }
 
@@ -133,6 +259,7 @@ impl ToolRegistry {
         self.max_access.allows(composite.access())
             && self.toolset_enabled(composite.toolset())
             && (self.local_files || !composite.uses_local_files())
+            && !(self.local_files && composite.remote_only())
     }
 
     /// Включён ли набор `slug`.
@@ -155,6 +282,11 @@ impl ToolRegistry {
         self.max_access
     }
 
+    /// Режим динамических наборов: наборы включаются инструментом `enable_toolset`.
+    pub fn is_dynamic(&self) -> bool {
+        self.dynamic
+    }
+
     fn push(&mut self, tool: RegisteredTool) -> Result<(), String> {
         let name = tool.tool.name.to_string();
         if self.index.contains_key(&name) {
@@ -166,7 +298,8 @@ impl ToolRegistry {
     }
 
     /// Зарегистрированные инструменты в порядке регистрации: операции по имени, затем
-    /// составные, затем встроенные.
+    /// составные, `api_request`, `api_search`, инструменты динамических наборов и
+    /// пользовательские.
     pub fn iter(&self) -> impl Iterator<Item = &RegisteredTool> {
         self.tools.iter()
     }
@@ -194,23 +327,45 @@ impl ToolRegistry {
         if self.get(name).is_some() {
             return None;
         }
-        let (access, toolset, local_files) = match Composite::find(name) {
+        if let Some(reason) = self.disabled_custom.get(name) {
+            return Some(reason.clone());
+        }
+        // У операции есть метод и путь для `api_request`, у составного инструмента — нет.
+        let (access, toolset, local_files, remote_only, request) = match Composite::find(name) {
             Some(composite) => (
                 composite.access(),
                 composite.toolset(),
                 composite.uses_local_files(),
+                composite.remote_only(),
+                None,
             ),
             None => {
                 let op = wiki_api::spec::find(name)?;
-                (op.access, op.toolset, uses_local_files(op))
+                (
+                    op.access,
+                    op.toolset,
+                    uses_local_files(op),
+                    false,
+                    Some(format!("{} {}", op.method.as_str(), op.path)),
+                )
             }
         };
         if !self.local_files && local_files {
             return Some(format!(
                 "tool `{name}` is not available on this server: it reads or writes a local file, \
                  and this server runs on another machine (HTTP mode) and cannot access the \
-                 agent's files. Ask the user to upload or download the file in Wiki, or to use \
-                 a local (stdio) `wiki-mcp serve`"
+                 agent's files. To attach a file from your machine, use `{upload}` (it needs \
+                 --allow-write); to download one, ask the user to do it in Wiki, or to use a \
+                 local (stdio) `wiki-mcp serve`",
+                upload = crate::CREATE_UPLOAD_URL_TOOL,
+            ));
+        }
+        if self.local_files && remote_only {
+            return Some(format!(
+                "tool `{name}` is available only on a remote server (`wiki-mcp serve --http`); \
+                 this server runs on the agent's machine and reads local files itself: attach \
+                 a file with `{upload}`",
+                upload = crate::UPLOAD_ATTACHMENT_TOOL,
             ));
         }
         if !self.max_access.allows(access) {
@@ -223,6 +378,18 @@ impl ToolRegistry {
             ));
         }
         if !self.toolset_enabled(toolset) {
+            if self.dynamic {
+                let alternative = match request {
+                    Some(request) => {
+                        format!(", or call the same operation with `api_request` ({request})")
+                    }
+                    None => String::new(),
+                };
+                return Some(format!(
+                    "tool `{name}` belongs to toolset `{toolset}`, which is not enabled: call \
+                     `{ENABLE_TOOLSET_TOOL}` with `toolset: \"{toolset}\"` first{alternative}"
+                ));
+            }
             return Some(format!(
                 "tool `{name}` belongs to toolset `{toolset}`, which is not enabled; ask the user \
                  to add it to --toolsets (enabled: {})",
@@ -235,14 +402,27 @@ impl ToolRegistry {
 
 /// Описание MCP-инструмента для операции.
 ///
-/// Схема — `input_schema` операции (у операций с двоичным ответом — плюс `save_to`),
-/// описание — [`OperationDef::tool_description`] (`summary`, `description`, ссылка на
+/// Схема — `input_schema` операции плюс `jq` (у операций с двоичным ответом — вместо него
+/// `save_to`), описание — [`OperationDef::tool_description`] (`summary`, `description`, ссылка на
 /// справочник), пояснения про локальные файлы и уровень доступа.
 pub fn operation_tool(op: &'static OperationDef) -> Result<Tool, String> {
     let mut schema: JsonObject = serde_json::from_str(op.input_schema)
         .map_err(|err| format!("{}: invalid input schema: {err}", op.tool_name))?;
     if takes_save_to(op) {
         add_save_to(op, &mut schema)?;
+    }
+    if takes_jq(op) {
+        if schema
+            .get("properties")
+            .and_then(|properties| properties.get(JQ_ARG))
+            .is_some()
+        {
+            return Err(format!(
+                "{}: parameter `{JQ_ARG}` clashes with the response filter argument",
+                op.tool_name
+            ));
+        }
+        add_jq_argument(&mut schema);
     }
 
     let mut description = op.tool_description();
@@ -339,7 +519,7 @@ fn add_save_to(op: &OperationDef, schema: &mut JsonObject) -> Result<(), String>
     Ok(())
 }
 
-fn access_verb(access: AccessLevel) -> &'static str {
+pub(crate) fn access_verb(access: AccessLevel) -> &'static str {
     match access {
         AccessLevel::Read => "reads",
         AccessLevel::Write => "creates or changes",
@@ -398,7 +578,10 @@ mod tests {
             .count()
             + Composite::ALL
                 .iter()
-                .filter(|c| access.allows(c.access()) && toolsets.contains(&c.toolset()))
+                // Сервер в тестах — на машине агента: адреса загрузки HTTP-режима нет.
+                .filter(|c| {
+                    access.allows(c.access()) && toolsets.contains(&c.toolset()) && !c.remote_only()
+                })
                 .count()
             + BUILTIN
     }
@@ -415,6 +598,9 @@ mod tests {
             assert_eq!(tool.name, op.tool_name);
             let expected: Value = serde_json::from_str(op.input_schema).unwrap();
             let mut actual = Value::Object((*tool.input_schema).clone());
+            // Фильтр `jq` есть у всех операций с JSON-ответом и только у них.
+            let jq = actual["properties"].as_object_mut().unwrap().remove(JQ_ARG);
+            assert_eq!(jq.is_some(), !takes_save_to(op), "{}", op.tool_name);
             if takes_save_to(op) {
                 // Единственное отличие от спецификации — аргумент `save_to`.
                 let props = actual["properties"].as_object_mut().unwrap();
@@ -539,6 +725,10 @@ mod tests {
             ToolKind::Operation(op) => op.toolset == "grids" || op.toolset == "extra",
             ToolKind::Composite(c) => c.toolset() == "grids" || c.toolset() == "extra",
             ToolKind::ApiRequest | ToolKind::ApiSearch => true,
+            ToolKind::Custom(_)
+            | ToolKind::ListToolsets
+            | ToolKind::EnableToolset
+            | ToolKind::DisableToolset => false,
         }));
         // Встроенные инструменты не зависят от наборов.
         assert!(chosen.get(API_REQUEST_TOOL).is_some());
@@ -681,10 +871,22 @@ mod tests {
         let reason = remote.unavailable_reason(UPLOAD_ATTACHMENT_TOOL).unwrap();
         assert!(reason.contains("HTTP mode"), "{reason}");
         assert!(remote.get(WAIT_FOR_OPERATION_TOOL).is_some());
+        // Вместо загрузки с диска — одноразовый адрес загрузки.
+        assert!(remote.get(crate::CREATE_UPLOAD_URL_TOOL).is_some());
         assert_eq!(
             remote.len(),
-            operations().len() - file_tools.len() + 1 + BUILTIN
+            operations().len() - file_tools.len() + 2 + BUILTIN
         );
+        let reason = remote.unavailable_reason("upload_file_part").unwrap();
+        assert!(reason.contains("create_upload_url"), "{reason}");
+        // На машине агента адреса загрузки нет: подсказка ведёт к `upload_attachment`.
+        let local = ToolRegistry::new(&options(AccessLevel::Destructive, all())).unwrap();
+        assert!(local.get(crate::CREATE_UPLOAD_URL_TOOL).is_none());
+        let reason = local
+            .unavailable_reason(crate::CREATE_UPLOAD_URL_TOOL)
+            .unwrap();
+        assert!(reason.contains("serve --http"), "{reason}");
+        assert!(reason.contains(UPLOAD_ATTACHMENT_TOOL), "{reason}");
         for tool in remote.iter() {
             let description = tool.tool.description.as_deref().unwrap_or_default();
             assert!(!description.contains("local file"), "{}", tool.tool.name);

@@ -1,6 +1,6 @@
 # Установка и обновление
 
-`wiki-mcp` — один бинарник: и MCP-сервер (`serve`), и CLI для настройки (`connect`, `auth`). Готовые сборки есть для macOS и Linux; на других платформах соберите бинарник из исходников.
+`wiki-mcp` — один бинарник: и MCP-сервер (`serve`), и CLI для настройки (`connect`, `auth`). Готовые сборки есть для macOS, Linux и Windows; на других платформах соберите бинарник из исходников.
 
 ## Платформы
 
@@ -9,7 +9,7 @@
 | macOS, Apple silicon и Intel | универсальный бинарник, подписан и нотаризован | Keychain |
 | Linux x86_64 | статический бинарник (musl), без зависимостей | Secret Service |
 | Linux aarch64 | статический бинарник (musl), без зависимостей | Secret Service |
-| Windows | готовых сборок нет, [из исходников](#из-исходников) | Credential Manager |
+| Windows x86_64 | [архив `.zip`](#windows), без зависимостей, не подписан | Credential Manager |
 
 Linux-бинарник собран статически: ему не нужны glibc определённой версии, `libdbus-1` и другие системные библиотеки, он запускается в любом дистрибутиве, включая Alpine и slim-образы. Для HTTPS-запросов к Wiki API нужны корневые сертификаты системы (пакет `ca-certificates`).
 
@@ -77,7 +77,7 @@ brew uninstall filipov-dev/tap/wiki-mcp
 
 ## Готовый архив
 
-Архивы и файл `SHA256SUMS` публикуются на [странице релизов](https://sourcecraft.dev/filipov-dev/wiki-mcp/releases). Имя архива: `wiki-mcp-<тег>-<платформа>.tar.gz`, например `wiki-mcp-v0.1.0-linux-x86_64.tar.gz`. Внутри — каталог с бинарником `wiki-mcp`, `README.md` и лицензиями.
+Архивы и файл `SHA256SUMS` публикуются на [странице релизов](https://sourcecraft.dev/filipov-dev/wiki-mcp/releases). Имя архива: `wiki-mcp-<тег>-<платформа>.tar.gz`, например `wiki-mcp-v0.1.0-linux-x86_64.tar.gz` (для Windows — `.zip`, см. [ниже](#windows)). Внутри — каталог с бинарником `wiki-mcp`, `README.md` и лицензиями.
 
 Проверьте контрольную сумму (из каталога, куда скачаны архив и `SHA256SUMS`):
 
@@ -99,6 +99,48 @@ wiki-mcp --version
 
 Чтобы обновиться, замените бинарник новым по тому же пути: конфигурацию клиентов трогать не нужно.
 
+## Windows
+
+Для Windows есть только архив `wiki-mcp-<тег>-windows-x86_64.zip` на [странице релизов](https://sourcecraft.dev/filipov-dev/wiki-mcp/releases): установочный скрипт и Homebrew Windows не поддерживают. Внутри архива — каталог с `wiki-mcp.exe`, `README.md` и лицензиями. Бинарнику не нужен Visual C++ Redistributable и другие библиотеки. Токены хранятся в Windows Credential Manager (общие учётные данные `<профиль>.dev.filipov.wiki-mcp`), настройки профилей — в `%APPDATA%\wiki-mcp\profiles.toml`.
+
+Скачайте архив и `SHA256SUMS` в один каталог и выполните в PowerShell из него (тег замените на тег нужного релиза):
+
+```powershell
+$tag = 'vX.Y.Z'
+$zip = "wiki-mcp-$tag-windows-x86_64.zip"
+
+# Контрольная сумма: значение должно совпасть со строкой архива в SHA256SUMS
+(Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+Select-String -SimpleMatch $zip SHA256SUMS
+
+# Распаковка и установка в профиль пользователя (права администратора не нужны)
+Unblock-File $zip
+Expand-Archive $zip -DestinationPath "$env:TEMP\wiki-mcp" -Force
+$dir = "$env:LOCALAPPDATA\Programs\wiki-mcp"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Copy-Item "$env:TEMP\wiki-mcp\wiki-mcp-$tag-windows-x86_64\wiki-mcp.exe" $dir -Force
+```
+
+Добавьте каталог в `PATH` пользователя (один раз) и откройте новое окно терминала:
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\wiki-mcp"
+$path = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($path -split ';') -notcontains $dir) {
+  [Environment]::SetEnvironmentVariable('Path', "$path;$dir", 'User')
+}
+```
+
+```powershell
+wiki-mcp --version
+```
+
+Бинарник не подписан сертификатом подписи кода. Если открыть его из Проводника или из браузера, SmartScreen может показать «Система Windows защитила ваш компьютер»: проверьте контрольную сумму и нажмите «Подробнее» → «Выполнить в любом случае». `Unblock-File` снимает с архива отметку «загружено из интернета», и распакованный бинарник её не получает. В Windows 11 со включённым Smart App Control неподписанные программы блокируются без возможности запуска — используйте другую машину, [HTTP-режим](http.md) на другой машине или соберите бинарник из исходников.
+
+Чтобы обновиться, замените `wiki-mcp.exe` новым по тому же пути: конфигурацию клиентов трогать не нужно. Пока MCP-клиент держит сервер запущенным, файл занят — закройте клиент или сначала переименуйте старый файл (`Rename-Item wiki-mcp.exe wiki-mcp.old.exe`; переименовать запущенный файл Windows разрешает) и удалите его после перезапуска клиента.
+
+Особенности `connect` и Credential Manager в Windows — в разделе [Подключение к MCP-клиентам](clients.md#windows).
+
 ## Из исходников
 
 Нужен Rust 1.88 или новее (`rustup` подхватит версию из `rust-toolchain.toml`) и C-компилятор для криптографии TLS. Системные библиотеки D-Bus и OpenSSL не нужны.
@@ -115,7 +157,7 @@ cargo install --path crates/wiki-mcp
 
 На macOS собранный локально бинарник не подписан Developer ID: после каждой пересборки Keychain снова спросит разрешение на доступ к токену ([Решение проблем](troubleshooting.md#macos-keychain-спрашивает-разрешение)).
 
-Сборка для Windows (нужны Visual Studio Build Tools с компилятором MSVC) не входит в релизы и автоматически не проверяется.
+Для сборки в Windows нужны Visual Studio Build Tools с компилятором MSVC ([Разработка](development.md#windows)).
 
 ## Docker
 

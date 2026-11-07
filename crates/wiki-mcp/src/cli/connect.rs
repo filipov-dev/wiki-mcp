@@ -6,23 +6,35 @@
 //! настройки в `profiles.toml` → запись сервера в конфигурацию клиента после подтверждения.
 //! Токен не проходит через агента и не попадает ни в аргументы, ни в конфигурацию клиента.
 //!
-//! `connect` работает только с OAuth-токеном приложения пользователя: тип токена профиля
-//! становится `oauth`, сохранённый IAM-токен не оставляется.
+//! Без флагов IAM `connect` работает с OAuth-токеном приложения пользователя: тип токена
+//! профиля становится `oauth`, сохранённый IAM-токен не оставляется.
+//!
+//! С `--iam-source yc` или `--service-account-key <FILE>` (федеративные и сервисные аккаунты
+//! Yandex Cloud) OAuth-приложения и токена в хранилище нет: в профиль пишутся тип, источник,
+//! организация Yandex Cloud и настройки `yc`, ключ — в системное хранилище, а проверка
+//! получает токен из источника. Профиль, который уже получает IAM-токены сам, продолжает
+//! так работать и без флагов.
 
 use std::path::PathBuf;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use clap::Args;
 use wiki_api::Organization;
 use wiki_api::auth::{AuthError, KeyringStore, TokenStore};
+use wiki_api::iam::{IamSource, KeyExchange};
 use wiki_mcp_core::toolsets;
 
 use crate::browser::{BrowserDecision, BrowserEnv, decide};
 use crate::clients::claude::{self, CommandRunner, SystemRunner};
 use crate::clients::{ClientKind, DEFAULT_SERVER_NAME, Scope, ServerSpec, codex};
-use crate::login::{check_new_token, org_from_flags, resolve_org, save_token};
+use crate::login::{
+    apply_yc_flags, check_iam, check_new_token, org_from_flags, resolve_iam_org, resolve_org,
+    save_service_account_key, save_token, service_account_key,
+};
 use crate::oauth::{ask_client_id, normalize_client_id, prompt_token};
-use crate::profiles::{ProfileRepo, ProfileSettings, TokenType, validate_profile_name};
+use crate::profiles::{
+    IamSourceKind, ProfileRepo, ProfileSettings, TokenType, validate_profile_name,
+};
 use crate::ui::{TerminalUi, Ui};
 use crate::verify::{ApiVerifier, TokenVerifier};
 
@@ -40,7 +52,15 @@ name. The client config gets only the command `wiki-mcp serve --profile <profile
 Links open in the default browser; over SSH, without a graphical session or with \
 --no-browser they are only printed.
 
-Use a separate profile and token for every client, so each can be revoked on its own.")]
+Use a separate profile and token for every client, so each can be revoked on its own.
+
+Federated and service accounts of a Yandex Cloud organization: with --iam-source yc (or \
+--yc-path, --yc-profile) or --service-account-key <FILE> there is no OAuth application and no \
+stored token. connect saves the token type, the IAM source, the Yandex Cloud organization and \
+the yc settings in the profile (the service account key goes to the system keychain, the file \
+path is not saved) and checks that the source gives an IAM token that Wiki accepts. The server \
+gets IAM tokens when needed, renews them before they expire and keeps them in memory only. A \
+profile already set up this way keeps using it without these flags.")]
 pub struct ConnectArgs {
     /// MCP client to register the server in.
     #[arg(value_enum)]
@@ -84,6 +104,53 @@ pub struct ConnectArgs {
     /// Do not open links in a browser; only print them.
     #[arg(long)]
     pub no_browser: bool,
+    /// Get Yandex Cloud IAM tokens instead of an OAuth token: `yc` (from
+    /// `yc iam create-token`) or `service-account-key` (for --service-account-key).
+    /// Needs a Yandex Cloud organization (--cloud-org-id).
+    #[arg(long, value_enum, value_name = "SOURCE", conflicts_with_all = ["client_id", "org_id"])]
+    pub iam_source: Option<IamSourceKind>,
+    /// Authorized key file of a service account (`yc iam key create --output key.json`).
+    /// Its content is stored in the system keychain, the path is not saved. Implies
+    /// --iam-source service-account-key.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["client_id", "org_id", "yc_path", "yc_profile"])]
+    pub service_account_key: Option<PathBuf>,
+    /// IAM from yc: absolute path to the yc CLI [default: yc from PATH]. Implies
+    /// --iam-source yc.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["client_id", "org_id"])]
+    pub yc_path: Option<PathBuf>,
+    /// IAM from yc: yc profile to get tokens with (yc --profile) [default: the active yc
+    /// profile]. Implies --iam-source yc.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["client_id", "org_id"])]
+    pub yc_profile: Option<String>,
+}
+
+impl ConnectArgs {
+    /// Источник IAM-токенов: флаги, иначе источник профиля; `None` — OAuth.
+    fn iam_source(&self, settings: &ProfileSettings) -> anyhow::Result<Option<IamSourceKind>> {
+        let yc_flags = self.yc_path.is_some() || self.yc_profile.is_some();
+        let source = match (
+            self.iam_source,
+            self.service_account_key.is_some(),
+            yc_flags,
+        ) {
+            (Some(IamSourceKind::Token), _, _) => bail!(
+                "connect does not store pasted IAM tokens, they expire within 12 hours: use \
+                 --iam-source yc or --service-account-key <FILE>, or `wiki-mcp auth login \
+                 --token-type iam`"
+            ),
+            (Some(IamSourceKind::Yc), true, _) => {
+                bail!("--service-account-key is used only with --iam-source service-account-key")
+            }
+            (Some(IamSourceKind::ServiceAccountKey), _, true) => {
+                bail!("--yc-path and --yc-profile are used only with --iam-source yc")
+            }
+            (_, true, _) => Some(IamSourceKind::ServiceAccountKey),
+            (Some(source), false, _) => Some(source),
+            (None, false, true) => Some(IamSourceKind::Yc),
+            (None, false, false) => settings.refreshing_source(),
+        };
+        Ok(source)
+    }
 }
 
 pub async fn run(args: ConnectArgs) -> anyhow::Result<()> {
@@ -207,10 +274,120 @@ pub async fn connect<V: TokenVerifier>(
             ..access.clone()
         },
     )?;
+    let iam_source = args.iam_source(&settings)?;
+    // Источник IAM-токенов проверяется до первого вопроса: настройки `yc` и файл ключа.
+    let iam = match iam_source {
+        None => None,
+        Some(IamSourceKind::Yc) => {
+            let command = apply_yc_flags(
+                &mut settings,
+                args.yc_path.as_deref(),
+                args.yc_profile.as_deref(),
+            )?;
+            Some((IamSourceKind::Yc, IamSource::Yc(command), None))
+        }
+        Some(source) => {
+            let (key, from_file) =
+                service_account_key(env.store, &profile, args.service_account_key.as_deref())?;
+            let exchange = KeyExchange::new(key.clone())?;
+            Some((
+                source,
+                IamSource::ServiceAccountKey(exchange),
+                from_file.then_some(key),
+            ))
+        }
+    };
     match client {
         ClientKind::ClaudeCode => claude::ensure_available(env.runner)?,
         ClientKind::Codex => codex::ensure_scope(args.scope)?,
     }
+
+    if let Some((source, iam, new_key)) = iam {
+        // IAM: ни OAuth-приложения, ни токена в хранилище; организация — только Yandex Cloud.
+        let org = resolve_iam_org(
+            env.ui,
+            &profile,
+            args.org_id.as_deref(),
+            args.cloud_org_id.as_deref(),
+            settings.org.clone(),
+        )?;
+        check_iam(env.ui, env.verifier, &iam, &org).await?;
+        if let Some(key) = &new_key {
+            save_service_account_key(env.ui, env.store, &profile, key)?;
+        }
+        settings.use_iam_source(source);
+        settings.org = Some(org);
+        env.ui.say(&format!(
+            "IAM tokens from {}, renewed before they expire; no token is stored.",
+            iam.display()
+        ));
+    } else {
+        let flags = OAuthFlags {
+            org: org_flags,
+            client_id: client_id_flag,
+            allow_write: access.allow_write,
+        };
+        let org = oauth_token(env, args, &profile, &mut settings, flags).await?;
+        settings.use_stored_token(TokenType::OAuth);
+        settings.org = Some(org);
+    }
+
+    settings.client = Some(client.name().to_owned());
+    settings.allow_write = access.allow_write;
+    settings.allow_destructive = access.allow_destructive;
+    settings.toolsets = toolsets;
+    env.repo.upsert(&profile, settings)?;
+    env.ui.say(&format!(
+        "Profile `{profile}` saved to {}.",
+        env.repo.path().display()
+    ));
+
+    let registered = match client {
+        ClientKind::ClaudeCode => {
+            claude::register(env.runner, env.ui, args.scope, &spec, args.yes)?
+        }
+        ClientKind::Codex => codex::register(env.ui, &env.codex_home, &spec, args.yes)?,
+    };
+    if registered {
+        env.ui.say(&format!(
+            "Done: {} now runs `{}` as MCP server `{}`. Restart the client to pick it up.",
+            client.display_name(),
+            spec.display(),
+            spec.name
+        ));
+    } else {
+        env.ui.say(&format!(
+            "{} config was not changed. The token and profile are kept; re-run \
+             `wiki-mcp connect {}` to register later.",
+            client.display_name(),
+            client.name()
+        ));
+    }
+    Ok(())
+}
+
+/// Флаги OAuth, проверенные до первого вопроса пользователю.
+struct OAuthFlags {
+    org: Option<Organization>,
+    client_id: Option<String>,
+    allow_write: bool,
+}
+
+/// OAuth: приложение пользователя, организация и токен профиля (рабочий сохранённый можно
+/// оставить). Возвращает организацию; токен сохранён в системном хранилище.
+async fn oauth_token<V: TokenVerifier>(
+    env: &mut ConnectEnv<'_, V>,
+    args: &ConnectArgs,
+    profile: &str,
+    settings: &mut ProfileSettings,
+    flags: OAuthFlags,
+) -> anyhow::Result<Organization> {
+    let OAuthFlags {
+        org: org_flags,
+        client_id: client_id_flag,
+        allow_write,
+    } = flags;
+    let profile = profile.to_owned();
 
     // OAuth-приложение пользователя. `ClientID` сохраняется сразу, чтобы повторный запуск
     // после ошибки на следующих шагах не спрашивал его снова.
@@ -235,7 +412,7 @@ pub async fn connect<V: TokenVerifier>(
                 shared = Some(app);
                 client_id
             }
-            _ => ask_client_id(env.ui, &profile, access.allow_write, env.browser)?,
+            _ => ask_client_id(env.ui, &profile, allow_write, env.browser)?,
         },
     };
     if settings.client_id.as_deref() != Some(client_id.as_str()) {
@@ -246,7 +423,7 @@ pub async fn connect<V: TokenVerifier>(
             env.repo.path().display()
         ));
     }
-    if access.allow_write {
+    if allow_write {
         env.ui
             .say("Writes are enabled: the OAuth application needs the wiki:write permission.");
     }
@@ -314,41 +491,7 @@ pub async fn connect<V: TokenVerifier>(
         check_new_token(env.ui, env.verifier, &token, TokenType::OAuth, &org).await?;
         save_token(env.ui, env.store, &profile, &token)?;
     }
-
-    settings.client = Some(client.name().to_owned());
-    settings.token_type = TokenType::OAuth;
-    settings.org = Some(org);
-    settings.allow_write = access.allow_write;
-    settings.allow_destructive = access.allow_destructive;
-    settings.toolsets = toolsets;
-    env.repo.upsert(&profile, settings)?;
-    env.ui.say(&format!(
-        "Profile `{profile}` saved to {}.",
-        env.repo.path().display()
-    ));
-
-    let registered = match client {
-        ClientKind::ClaudeCode => {
-            claude::register(env.runner, env.ui, args.scope, &spec, args.yes)?
-        }
-        ClientKind::Codex => codex::register(env.ui, &env.codex_home, &spec, args.yes)?,
-    };
-    if registered {
-        env.ui.say(&format!(
-            "Done: {} now runs `{}` as MCP server `{}`. Restart the client to pick it up.",
-            client.display_name(),
-            spec.display(),
-            spec.name
-        ));
-    } else {
-        env.ui.say(&format!(
-            "{} config was not changed. The token and profile are kept; re-run \
-             `wiki-mcp connect {}` to register later.",
-            client.display_name(),
-            client.name()
-        ));
-    }
-    Ok(())
+    Ok(org)
 }
 
 #[cfg(test)]
@@ -458,6 +601,10 @@ mod tests {
             yes: false,
             skip_check: false,
             no_browser: false,
+            iam_source: None,
+            service_account_key: None,
+            yc_path: None,
+            yc_profile: None,
         }
     }
 
@@ -950,5 +1097,80 @@ mod tests {
         );
         let settings = fx.repo.get("codex").unwrap().unwrap();
         assert_eq!(settings.token_type, TokenType::OAuth);
+    }
+
+    /// `connect --yc-profile`: без OAuth-приложения и токена, `yc` — подменный скрипт.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn yc_source_registers_without_oauth() {
+        use crate::login::testing::FakeYc;
+
+        let yc = FakeYc::new();
+        let mut fx = Fixture::new();
+        fx.verifier = FakeVerifier {
+            valid_token: "iam-token-1".into(),
+        };
+        let mut args = args(ClientKind::Codex);
+        args.yes = true;
+        args.cloud_org_id = Some("cloud-org".into());
+        args.yc_path = Some(yc.path());
+        args.yc_profile = Some("work".into());
+        fx.connect(&args).await.unwrap();
+
+        assert_eq!(yc.calls(), 1);
+        assert!(!fx.store.contains("codex").unwrap());
+        assert!(fx.ui.opened.is_empty(), "{:?}", fx.ui.opened);
+        let settings = fx.repo.get("codex").unwrap().unwrap();
+        assert_eq!(settings.token_type, TokenType::Iam);
+        assert_eq!(settings.iam_source, IamSourceKind::Yc);
+        assert_eq!(settings.client_id, None);
+        assert_eq!(
+            settings.org.unwrap().header(),
+            ("X-Cloud-Org-Id", "cloud-org")
+        );
+        let output = fx.ui.text();
+        assert!(output.contains("no token is stored"), "{output}");
+        assert!(!output.contains("iam-token-1"), "{output}");
+        let config = fx.codex_config().unwrap();
+        assert!(
+            config.contains(&toml_args(&["serve", "--profile", "codex"])),
+            "{config}"
+        );
+
+        // Повторный запуск без флагов остаётся на yc.
+        let mut again = super::tests::args(ClientKind::Codex);
+        again.yes = true;
+        fx.verifier = FakeVerifier {
+            valid_token: "iam-token-2".into(),
+        };
+        fx.connect(&again).await.unwrap();
+        assert_eq!(yc.calls(), 2);
+        let settings = fx.repo.get("codex").unwrap().unwrap();
+        assert_eq!(settings.iam_source, IamSourceKind::Yc);
+        assert_eq!(settings.yc_profile.as_deref(), Some("work"));
+    }
+
+    #[tokio::test]
+    async fn iam_flags_are_checked_before_questions() {
+        let mut fx = Fixture::new();
+        let mut bad = args(ClientKind::Codex);
+        bad.iam_source = Some(IamSourceKind::Token);
+        let err = fx.connect(&bad).await.unwrap_err();
+        assert!(err.to_string().contains("12 hours"), "{err}");
+
+        let mut bad = args(ClientKind::Codex);
+        bad.iam_source = Some(IamSourceKind::ServiceAccountKey);
+        let err = fx.connect(&bad).await.unwrap_err();
+        assert!(
+            err.to_string().contains("--service-account-key <FILE>"),
+            "{err}"
+        );
+
+        let mut bad = args(ClientKind::Codex);
+        bad.service_account_key = Some(fx._dir.path().join("missing.json"));
+        let err = fx.connect(&bad).await.unwrap_err();
+        assert!(err.to_string().contains("missing.json"), "{err}");
+        assert!(fx.ui.questions.is_empty());
+        assert!(fx.repo.get("codex").unwrap().is_none());
     }
 }

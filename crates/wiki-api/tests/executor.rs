@@ -6,8 +6,8 @@ use serde_json::json;
 use wiki_api::ApiToken;
 use wiki_api::HttpMethod;
 use wiki_api::executor::{
-    ApiClient, ApiError, ApiRequest, ClientConfig, Credentials, MAX_FILE_BODY_BYTES, OrgId,
-    RequestBody, ResponseBody, RetryPolicy,
+    ApiClient, ApiError, ApiRequest, BodyBytes, ClientConfig, Credentials, MAX_FILE_BODY_BYTES,
+    OrgId, RequestBody, ResponseBody, RetryPolicy,
 };
 use wiremock::matchers::{body_bytes, body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -23,6 +23,7 @@ fn config(base: &str) -> ClientConfig {
     ClientConfig {
         base_url: url::Url::parse(base).unwrap(),
         credentials: Some(Credentials::oauth(ApiToken::new(TOKEN))),
+        iam: None,
         org: Some(OrgId::Yandex360(ORG.into())),
         timeout: Duration::from_secs(5),
         max_response_bytes: 64 * 1024,
@@ -550,6 +551,42 @@ async fn retry_limits() {
             .status(),
         Some(500)
     );
+}
+
+#[tokio::test]
+async fn bytes_body_is_sent_raw_and_resent_on_retry() {
+    let server = MockServer::start().await;
+    let upload = format!("/v1/upload_sessions/{SESSION}/upload_part");
+    Mock::given(path(upload.as_str()))
+        .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(upload.as_str()))
+        .and(header("content-type", "application/octet-stream"))
+        .and(body_bytes(b"bytes-body-17".to_vec()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    let body = BodyBytes::from(b"bytes-body-17".to_vec());
+    // Содержимое в отладочный вывод не попадает.
+    assert_eq!(format!("{body:?}"), "BodyBytes(13 bytes)");
+    let mut request = ApiRequest::new(HttpMethod::Put, upload.clone());
+    request.body = RequestBody::Bytes(body);
+    client.execute(request).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+    // Пустое и слишком большое тело не отправляются.
+    for len in [0, MAX_FILE_BODY_BYTES as usize + 1] {
+        let mut request = ApiRequest::new(HttpMethod::Put, upload.clone());
+        request.body = RequestBody::Bytes(BodyBytes::from(vec![0_u8; len]));
+        let err = client.execute(request).await.unwrap_err();
+        assert!(matches!(err, ApiError::InvalidRequest(_)), "{len}: {err:?}");
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]

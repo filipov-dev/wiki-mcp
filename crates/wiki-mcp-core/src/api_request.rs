@@ -13,7 +13,10 @@
 //!   своим инструментом;
 //! - `save_to` принимается только для операций с двоичным ответом (скачивание вложений), для
 //!   них он обязателен и проходит [`FilePolicy`]. JSON-ответ в файл не сохраняется: там
-//!   вырезание учётных данных не сработало бы.
+//!   вырезание учётных данных не сработало бы;
+//! - необязательный фильтр ответа `jq` ([`crate::jq`]) сервер извлекает из аргументов до
+//!   [`prepare`] и применяет к уже очищенному JSON-ответу; вместе с `save_to` он не
+//!   допускается.
 
 use std::sync::Arc;
 
@@ -24,6 +27,7 @@ use wiki_api::spec::{AccessLevel, BodyKind, HttpMethod, OperationDef, ResponseKi
 
 use crate::error::ToolError;
 use crate::files::{FilePolicy, LOCAL_FILES_DISABLED};
+use crate::jq::add_jq_argument;
 use crate::registry::{access_flag, access_name};
 use crate::request::{SAVE_TO_ARG, save_to_path};
 use crate::routes::{AccessDecision, default_access, required_access};
@@ -101,10 +105,11 @@ pub fn api_request_tool(max_access: AccessLevel, local_files: bool) -> Tool {
         "required": ["method", "path"],
         "additionalProperties": false
     });
-    let schema = match schema {
+    let mut schema = match schema {
         Value::Object(map) => map,
         _ => JsonObject::new(),
     };
+    add_jq_argument(&mut schema);
 
     let allowed = match max_access {
         AccessLevel::Read => {
@@ -132,7 +137,9 @@ pub fn api_request_tool(max_access: AccessLevel, local_files: bool) -> Tool {
          Access: a request that matches a known API operation needs that operation's access \
          level (for example, POST /v1/search is read-only and changing page access rights is \
          destructive); otherwise GET is read, POST/PUT/PATCH are write and DELETE is \
-         destructive. {allowed} Toolsets do not restrict this tool."
+         destructive. {allowed} Toolsets do not restrict this tool.\n\n\
+         The response is returned like other tools' responses (credentials redacted); pass \
+         `jq` to filter the JSON body."
     );
 
     let base = ToolAnnotations::with_title("Custom Wiki API request").open_world(true);

@@ -2,7 +2,10 @@
 //!
 //! stdio: stdout занят протоколом MCP, всё остальное (логи, ошибки запуска) — только в stderr.
 //! Токен и организация берутся только из профиля: токен — из системного хранилища, тип
-//! токена и организация — из `profiles.toml`. Переменные окружения токен не задают.
+//! токена и организация — из `profiles.toml`. Профиль с IAM-токенами из `yc` или по ключу
+//! сервисного аккаунта получает токены сам при запросах и обновляет их до истечения срока
+//! (`wiki_api::iam::IamTokens`), токены держатся только в памяти. Переменные окружения токен
+//! не задают.
 //!
 //! HTTP ([`http_server`]): профилей и хранилища нет, токен (и организация, если её не задаёт
 //! флаг сервера) приходит в заголовках каждого запроса агента и нигде не сохраняется.
@@ -15,11 +18,17 @@
 //!
 //! Локальные файлы (загрузка части файла, скачивание вложений в `save_to`) разрешены только
 //! в рабочем каталоге, временном каталоге и каталогах `--allow-path` (`FilePolicy`).
+//!
+//! Пользовательские инструменты ([`crate::cli::tools`]) читаются при запуске: в stdio — файл
+//! пользователя и `--tools-file`, в HTTP — только `--tools-file`. Фильтры `jq` выполняются в
+//! дочернем процессе этого бинарника ([`crate::cli::jq_worker`]). Динамические наборы
+//! (`--dynamic-toolsets`) есть только в stdio: HTTP-режим не хранит сессий.
 
 mod http_server;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
@@ -27,17 +36,19 @@ use clap::Args;
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use tracing_subscriber::EnvFilter;
-use wiki_api::auth::{KEYRING_SERVICE, KeyringStore, TokenStore};
+use wiki_api::auth::{KEYRING_SERVICE, KeyringStore, TokenStore, service_account_key_account};
 use wiki_api::executor::{ApiClient, ClientConfig, Credentials, OrgId};
+use wiki_api::iam::IamTokens;
 use wiki_api::{AccessLevel, OrgKind, Organization};
 use wiki_mcp_core::{
     ALL_TOOLSETS, FilePolicy, ServerOptions, ToolRegistry, WikiServer, access_from_flags,
     access_name, default_toolsets, normalize_toolsets,
 };
 
+use crate::cli::{jq_worker, tools};
 use crate::profiles::{
-    DEFAULT_PROFILE, ProfileRepo, ProfileSettings, TokenType, load_profile_with,
-    validate_profile_name,
+    DEFAULT_PROFILE, IamSourceKind, ProfileAuth, ProfileRepo, ProfileSettings, TokenType,
+    load_profile_with, validate_profile_name,
 };
 use crate::ui::{TerminalUi, Ui};
 
@@ -58,11 +69,34 @@ explicitly. --allow-destructive implies --allow-write; changing access rights ne
 --allow-destructive. Use --toolsets all for every toolset; the error for an unknown name lists \
 the available ones.
 
+Dynamic toolsets: with --dynamic-toolsets the server starts with only `api_search`, \
+`api_request`, `list_toolsets`, `enable_toolset` and `disable_toolset`, plus the toolsets given \
+with --toolsets and the custom tools; the agent enables toolsets on demand (composite tools come \
+with their toolset: upload_attachment with attachments, wait_for_operation with pages) and the \
+client is notified that the tool list changed. The access level still applies. Use it with \
+clients that load all tool descriptions up front and reload the list on \
+`notifications/tools/list_changed`. Not available in HTTP mode, which keeps no sessions.
+
+Response filter: every API tool and `api_request` accept an optional `jq` argument (jaq \
+dialect) applied to the JSON response after credentials are redacted; --max-response-bytes then \
+limits the filtered result. Cursors of list responses (`next_cursor`, `prev_cursor`) are kept \
+next to the filter output. Filters run in a child process without environment, files or \
+network, with a timeout.
+
+Custom tools: tools defined in tools.toml next to profiles.toml (~/.config/wiki-mcp/tools.toml) \
+are registered when the file exists; files from other places (for example, a project \
+repository) only with --tools-file. A custom tool calls one API operation with fixed arguments \
+and an optional `jq` filter, and has the access level of that operation; toolsets do not limit \
+it. Check the files with `wiki-mcp tools check`.
+
 Token and organization: read only from the profile (the token from the system keychain, its \
 type and the organization from profiles.toml); store them with `wiki-mcp auth login`. An OAuth \
 token is sent as `Authorization: OAuth <token>`, a Yandex Cloud IAM token as \
-`Authorization: Bearer <token>`. The token is never read from environment variables or \
-command-line arguments.
+`Authorization: Bearer <token>`. A profile set up with `--iam-source yc` or \
+`--iam-source service-account-key` gets IAM tokens itself (from `yc iam create-token` or for \
+the service account key in the system keychain), renews them before they expire and keeps \
+them in memory only, so the server runs for any time without a manual token update. The token \
+is never read from environment variables or command-line arguments.
 
 Local files: file arguments of tools (`file` of upload_attachment and upload_file_part, `save_to` for attachment \
 downloads) must be inside the server's working directory (unless it is the filesystem root or \
@@ -94,9 +128,18 @@ pub struct ServeArgs {
     /// Register tools that delete data or change access rights (implies --allow-write).
     #[arg(long)]
     pub allow_destructive: bool,
-    /// Comma-separated toolsets to enable, or `all`.
+    /// Comma-separated toolsets to enable, or `all`. With --dynamic-toolsets: the toolsets
+    /// enabled at start.
     #[arg(long, value_delimiter = ',', value_name = "TOOLSET,...")]
     pub toolsets: Vec<String>,
+    /// Load toolsets on demand: start with only the search, request and toolset tools, and
+    /// let the agent enable toolsets with `enable_toolset`. Not available with --http.
+    #[arg(long, conflicts_with = "http")]
+    pub dynamic_toolsets: bool,
+    /// Additional custom tools file (same format as ~/.config/wiki-mcp/tools.toml).
+    /// Repeatable. In HTTP mode only these files are read.
+    #[arg(long, value_name = "PATH")]
+    pub tools_file: Vec<PathBuf>,
     /// Extra directory that tools may read files from or save files to. Repeatable.
     /// Not available with --http.
     #[arg(long, value_name = "DIR", conflicts_with = "http")]
@@ -174,6 +217,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         tracing::info!(
             access = ?setup.options.max_access,
             toolsets = ?setup.options.toolsets,
+            custom_tools = setup.options.custom_tools.len(),
             "настройки MCP-сервера Wiki (HTTP)"
         );
         let listen = setup.listen;
@@ -189,6 +233,8 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         profile = %setup.profile,
         access = ?setup.options.max_access,
         toolsets = ?setup.options.toolsets,
+        dynamic_toolsets = setup.options.dynamic_toolsets,
+        custom_tools = setup.options.custom_tools.len(),
         roots = %setup.files.describe_roots(),
         "запуск MCP-сервера Wiki"
     );
@@ -238,15 +284,22 @@ impl Setup {
         let profile_name = args.profile();
         let profile = load_profile_with(repo, store, profile_name)
             .with_context(|| format!("cannot load profile `{profile_name}`"))?;
-        let options = effective_options(args, &profile.settings)?;
+        let mut options = effective_options(args, &profile.settings)?;
+        options.custom_tools = tools::load(Some(&tools::user_tools_file(repo)), &args.tools_file)?;
+        options.jq = jq_worker::current_runner();
         let files = FilePolicy::with_defaults(&args.allow_path).map_err(|err| anyhow!(err))?;
-        // Схема `Authorization` — по типу токена профиля.
-        let credentials = match profile.settings.token_type {
-            TokenType::OAuth => Credentials::oauth(profile.token),
-            TokenType::Iam => Credentials::iam(profile.token),
+        // Схема `Authorization` — по типу токена профиля; IAM-токены из источника
+        // получаются при запросах и обновляются по сроку.
+        let (credentials, iam) = match profile.auth {
+            ProfileAuth::Stored(token) => match profile.settings.token_type {
+                TokenType::OAuth => (Some(Credentials::oauth(token)), None),
+                TokenType::Iam => (Some(Credentials::iam(token)), None),
+            },
+            ProfileAuth::Iam(source) => (None, Some(Arc::new(IamTokens::new(source)))),
         };
-        let mut config = ClientConfig::new(Some(credentials), Some(OrgId::from(&profile.org)))
+        let mut config = ClientConfig::new(credentials, Some(OrgId::from(&profile.org)))
             .map_err(|err| anyhow!("cannot configure the Wiki API client: {err}"))?;
+        config.iam = iam;
         config.timeout = Duration::from_secs(args.timeout);
         config.max_response_bytes = args.max_response_bytes;
         Ok(Self {
@@ -284,6 +337,15 @@ impl HttpSetup {
             // Сервер не на машине агента: файловых инструментов нет, инструкции — для HTTP.
             local_machine: false,
             profile: None,
+            // Только явные файлы: HTTP-режим собирается из флагов, без каталога конфигурации.
+            // Это файлы оператора сервера, а не агента.
+            custom_tools: tools::load(None, &args.tools_file)?,
+            // Фильтры `jq` и здесь выполняются в отдельном процессе: это защита сервера от
+            // зависших фильтров, а не доступ к файлам.
+            jq: jq_worker::current_runner(),
+            // HTTP без сессий: включённые наборы негде хранить между запросами (флаг
+            // `--dynamic-toolsets` с `--http` отклоняет clap).
+            ..ServerOptions::default()
         };
         let org = match (&args.org_id, &args.cloud_org_id) {
             (Some(id), _) => Some(server_org(OrgKind::Yandex360, id, "--org-id")?),
@@ -326,7 +388,8 @@ impl HttpSetup {
             FilePolicy::disabled(),
             http_server::token_source(),
         )
-        .map_err(|err| anyhow!(err))?;
+        .map_err(|err| anyhow!(err))?
+        .with_upload_urls(http_server::upload_urls(&self.http)?);
         Ok((server, self.http))
     }
 }
@@ -401,8 +464,11 @@ fn effective_options(
     Ok(ServerOptions {
         max_access,
         toolsets,
+        dynamic_toolsets: args.dynamic_toolsets,
         local_machine: true,
         profile: Some(args.profile().to_owned()),
+        // Пользовательские инструменты и исполнитель `jq` заполняет `Setup::load`.
+        ..ServerOptions::default()
     })
 }
 
@@ -417,14 +483,44 @@ pub fn status(
     args.validate()?;
     let profile = args.profile();
     let settings = repo.get(profile)?.unwrap_or_default();
-    let has_token = store.contains(profile)?;
+    let source = settings.refreshing_source();
+    let token_line = match source {
+        None if store.contains(profile)? => Ok(format!(
+            "stored in the system keychain (service `{KEYRING_SERVICE}`)"
+        )),
+        None => Err(format!(
+            "not found; store it with `wiki-mcp auth login --profile {profile}`"
+        )),
+        Some(IamSourceKind::Yc) => match settings.yc_command() {
+            Ok(command) => Ok(format!(
+                "not stored; IAM tokens from `{}` when needed, kept in memory only",
+                command.display()
+            )),
+            Err(err) => Err(format!("invalid yc settings: {err:#}")),
+        },
+        Some(_) => match store.get_service_account_key(profile) {
+            Ok(key) => Ok(format!(
+                "not stored; IAM tokens for service account key `{}` of `{}` (key in the \
+                 system keychain, account `{}`) when needed, kept in memory only",
+                key.id(),
+                key.service_account_id(),
+                service_account_key_account(profile)
+            )),
+            Err(err) => Err(err.to_string()),
+        },
+    };
+    let has_token = token_line.is_ok();
     let (access, access_source) = effective_access(args, &settings);
     let (toolsets, toolsets_source) = effective_toolsets(args, &settings)?;
+    let tools_file = tools::user_tools_file(repo);
     let options = ServerOptions {
         max_access: access,
         toolsets,
+        dynamic_toolsets: args.dynamic_toolsets,
+        custom_tools: tools::load(Some(&tools_file), &args.tools_file)?,
         local_machine: true,
         profile: Some(profile.to_owned()),
+        ..ServerOptions::default()
     };
     let registry = ToolRegistry::new(&options).map_err(|err| anyhow!(err))?;
     let files = FilePolicy::with_defaults(&args.allow_path).map_err(|err| anyhow!(err))?;
@@ -432,11 +528,7 @@ pub fn status(
     ui.say(&format!("Profile:   {profile}"));
     ui.say(&format!(
         "Token:     {}",
-        if has_token {
-            format!("stored in the system keychain (service `{KEYRING_SERVICE}`)")
-        } else {
-            format!("not found; store it with `wiki-mcp auth login --profile {profile}`")
-        }
+        token_line.unwrap_or_else(|err| err)
     ));
     ui.say(&format!(
         "Type:      {} (Authorization: {})",
@@ -459,6 +551,8 @@ pub fn status(
     let enabled = registry.enabled_toolsets();
     let toolsets_text = if enabled.len() == wiki_api::spec::toolsets().len() {
         ALL_TOOLSETS.to_owned()
+    } else if enabled.is_empty() {
+        "none".to_owned()
     } else {
         enabled.join(",")
     };
@@ -472,13 +566,41 @@ pub fn status(
         .filter(|slug| !enabled.iter().any(|name| name == slug))
         .collect();
     if !disabled.is_empty() {
-        ui.say(&format!(
-            "Disabled:  {} (enable with --toolsets; default: {})",
-            disabled.join(","),
-            default_toolsets().join(",")
-        ));
+        // В динамическом режиме остальные наборы включает сам агент.
+        let hint = if options.dynamic_toolsets {
+            "the agent enables them with enable_toolset".to_owned()
+        } else {
+            format!(
+                "enable with --toolsets; default: {}",
+                default_toolsets().join(",")
+            )
+        };
+        ui.say(&format!("Disabled:  {} ({hint})", disabled.join(",")));
     }
+    ui.say(&format!(
+        "Dynamic:   {}",
+        if options.dynamic_toolsets {
+            format!("on ({})", Source::Flags.label())
+        } else {
+            "off".to_owned()
+        }
+    ));
     ui.say(&format!("Tools:     {}", registry.len()));
+    let custom_registered = options
+        .custom_tools
+        .iter()
+        .filter(|tool| registry.get(&tool.name).is_some())
+        .count();
+    ui.say(&format!(
+        "Custom:    {} defined, {custom_registered} registered (user file: {}{})",
+        options.custom_tools.len(),
+        tools_file.display(),
+        if tools_file.exists() {
+            ""
+        } else {
+            ", not found"
+        }
+    ));
     ui.say(&format!("Files:     {}", files.describe_roots()));
     ui.say(&format!("Profiles:  {}", repo.path().display()));
     if !has_token || settings.org.is_none() {
@@ -879,6 +1001,154 @@ mod tests {
         assert_eq!(setup.config.org, Some(OrgId::Yandex360("12345".into())));
     }
 
+    const TOOLS_TOML: &str = r#"
+[[tools]]
+name = "team_pages"
+description = "Pages of the team section"
+operation = "list_page_descendants"
+jq = ".results[] | {slug, title}"
+
+[tools.args]
+slug = "team/project"
+
+[[tools]]
+name = "comment_on_home"
+description = "Comment on the home page"
+operation = "create_comment"
+args = { idx = 42 }
+"#;
+
+    #[test]
+    fn dynamic_toolsets_from_flag() {
+        assert!(!options(&[], &ProfileSettings::default()).dynamic_toolsets);
+        let opts = options(
+            &["--dynamic-toolsets", "--toolsets", "grids"],
+            &ProfileSettings::default(),
+        );
+        assert!(opts.dynamic_toolsets);
+        assert_eq!(opts.toolsets, Some(vec!["grids".to_owned()]));
+
+        // HTTP без сессий: включённые наборы негде хранить.
+        let err = try_parse(&["--http", "--dynamic-toolsets"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{err}"
+        );
+
+        let (_dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
+        let text = status_text(&["--profile", "ci"], &repo, &store);
+        assert!(text.contains("Dynamic:   off"), "{text}");
+        let text = status_text(&["--profile", "ci", "--dynamic-toolsets"], &repo, &store);
+        assert!(
+            text.contains("Dynamic:   on (from command-line flags)"),
+            "{text}"
+        );
+        assert!(text.contains("Toolsets:  none"), "{text}");
+        assert!(
+            text.contains("(the agent enables them with enable_toolset)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_counts_custom_tools() {
+        let (dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
+        let text = status_text(&["--profile", "ci"], &repo, &store);
+        assert!(
+            text.contains("Custom:    0 defined, 0 registered (user file: "),
+            "{text}"
+        );
+        assert!(text.contains("tools.toml, not found)"), "{text}");
+
+        std::fs::write(dir.path().join("tools.toml"), TOOLS_TOML).unwrap();
+        let text = status_text(&["--profile", "ci"], &repo, &store);
+        // Инструмент записи определён, но без --allow-write не зарегистрирован.
+        assert!(
+            text.contains("Custom:    2 defined, 1 registered"),
+            "{text}"
+        );
+        let text = status_text(&["--profile", "ci", "--allow-write"], &repo, &store);
+        assert!(
+            text.contains("Custom:    2 defined, 2 registered"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn http_reads_only_explicit_tools_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("team.toml");
+        std::fs::write(&file, TOOLS_TOML).unwrap();
+        let setup = HttpSetup::load(&parse(&["--http"])).unwrap();
+        assert!(setup.options.custom_tools.is_empty());
+        assert!(!setup.options.dynamic_toolsets);
+        let file_arg = file.to_str().unwrap();
+        let setup = HttpSetup::load(&parse(&["--http", "--tools-file", file_arg])).unwrap();
+        let names: Vec<&str> = setup
+            .options
+            .custom_tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["team_pages", "comment_on_home"]);
+        let (server, _) = setup.server().unwrap();
+        assert!(server.registry().get("team_pages").is_some());
+        assert!(server.registry().get("comment_on_home").is_none());
+
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "[[tools]]\nname = \"x\"\n").unwrap();
+        let err = HttpSetup::load(&parse(&["--http", "--tools-file", bad.to_str().unwrap()]))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("bad.toml"), "{err}");
+    }
+
+    /// Свой инструмент из `tools.toml` рядом с профилями появляется у агента и вызывает
+    /// операцию со своими аргументами и фильтром.
+    #[tokio::test]
+    async fn serves_custom_tools_from_config_dir() {
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/pages/descendants"))
+            .and(wiremock::matchers::query_param("slug", "team/project"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"id": 1, "slug": "team/project/a", "title": "A"}]
+            })))
+            .expect(1)
+            .mount(&api)
+            .await;
+
+        let (dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
+        std::fs::write(dir.path().join("tools.toml"), TOOLS_TOML).unwrap();
+        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        setup.config.base_url = api.uri().parse().unwrap();
+        // В тестах текущий бинарник — тестовый, подкоманды `jq-worker` у него нет.
+        setup.options.jq = wiki_mcp_core::JqRunner::in_process();
+        let server = setup.server().unwrap();
+
+        let (server_io, client_io) = tokio::io::duplex(256 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = server.serve(server_io).await.unwrap();
+            let _ = running.waiting().await;
+        });
+        let client = ().serve(client_io).await.unwrap();
+        let tools = client.list_all_tools().await.unwrap();
+        assert!(tools.iter().any(|t| t.name == "team_pages"));
+        assert!(!tools.iter().any(|t| t.name == "comment_on_home"));
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("team_pages"))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert_eq!(text, r#"{"slug":"team/project/a","title":"A"}"#);
+
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+    }
+
     /// Сервер из профиля целиком: initialize, tools/list и вызов через in-memory транспорт,
     /// API — wiremock.
     #[tokio::test]
@@ -929,6 +1199,104 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(false));
 
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    /// Профиль с IAM-токенами из источника: токена в хранилище нет, `serve --status`
+    /// описывает источник, у клиента API — источник токенов вместо токена.
+    #[test]
+    fn iam_source_profiles_need_no_stored_token() {
+        use crate::login::key_testing::{KEY_ID, SA_ID, key_file};
+        use crate::profiles::IamSourceKind;
+        use wiki_api::service_account::ServiceAccountKey;
+
+        let cloud = wiki_api::Organization::new(OrgKind::Cloud, "cloud-org").unwrap();
+        let mut yc = ProfileSettings {
+            yc_profile: Some("work".into()),
+            org: Some(cloud.clone()),
+            ..Default::default()
+        };
+        yc.use_iam_source(IamSourceKind::Yc);
+        let (_dir, repo, store) = fixture(Some(yc), false);
+        let text = status_text(&["--profile", "ci"], &repo, &store);
+        assert!(
+            text.contains("IAM tokens from `yc iam create-token --profile work`"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot start"), "{text}");
+        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        assert!(setup.config.credentials.is_none());
+        assert!(setup.config.iam.is_some());
+        assert_eq!(setup.config.org, Some(OrgId::Cloud("cloud-org".into())));
+
+        let mut sa = ProfileSettings {
+            org: Some(cloud),
+            ..Default::default()
+        };
+        sa.use_iam_source(IamSourceKind::ServiceAccountKey);
+        let (_dir, repo, store) = fixture(Some(sa), false);
+        let text = status_text(&["--profile", "ci"], &repo, &store);
+        assert!(text.contains("--service-account-key <FILE>"), "{text}");
+        assert!(text.contains("cannot start"), "{text}");
+        assert!(Setup::load(&parse(&["--profile", "ci"]), &store, &repo).is_err());
+
+        let key = ServiceAccountKey::from_json(key_file().0.as_bytes()).unwrap();
+        store.set_service_account_key("ci", &key).unwrap();
+        let text = status_text(&["--profile", "ci"], &repo, &store);
+        assert!(
+            text.contains(&format!("service account key `{KEY_ID}` of `{SA_ID}`")),
+            "{text}"
+        );
+        assert!(!text.contains("cannot start"), "{text}");
+        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        assert!(setup.config.iam.is_some());
+    }
+
+    /// Сервер из профиля с `yc`: вызов инструмента получает IAM-токен из подменного `yc`
+    /// и отправляет его как `Bearer`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serves_with_iam_tokens_from_yc() {
+        use crate::login::testing::FakeYc;
+        use crate::profiles::IamSourceKind;
+
+        let yc = FakeYc::new();
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/me"))
+            .and(header("authorization", "Bearer iam-token-1"))
+            .and(header("x-cloud-org-id", "cloud-org"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "robot"})))
+            .expect(2)
+            .mount(&api)
+            .await;
+        let mut settings = ProfileSettings {
+            yc_path: Some(yc.path()),
+            org: Some(wiki_api::Organization::new(OrgKind::Cloud, "cloud-org").unwrap()),
+            ..Default::default()
+        };
+        settings.use_iam_source(IamSourceKind::Yc);
+        let (_dir, repo, store) = fixture(Some(settings), false);
+        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        setup.config.base_url = api.uri().parse().unwrap();
+        let server = setup.server().unwrap();
+
+        let (server_io, client_io) = tokio::io::duplex(256 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = server.serve(server_io).await.unwrap();
+            let _ = running.waiting().await;
+        });
+        let client = ().serve(client_io).await.unwrap();
+        for _ in 0..2 {
+            let result = client
+                .call_tool(CallToolRequestParams::new("get_current_user"))
+                .await
+                .unwrap();
+            assert_eq!(result.is_error, Some(false));
+        }
+        // Токен взят из памяти: yc запущен один раз.
+        assert_eq!(yc.calls(), 1);
         client.cancel().await.unwrap();
         handle.await.unwrap();
     }

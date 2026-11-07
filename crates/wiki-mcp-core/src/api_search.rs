@@ -34,6 +34,7 @@ use serde_json::{Map, Value, json};
 use wiki_api::spec::{AccessLevel, OperationDef, find, operations};
 
 use crate::composite::Composite;
+use crate::dynamic_toolsets::ENABLE_TOOLSET_TOOL;
 use crate::error::ToolError;
 use crate::registry::{ToolRegistry, access_flag, access_name, uses_local_files};
 use crate::toolsets::available_toolsets;
@@ -161,9 +162,11 @@ pub fn api_search_tool() -> Tool {
         `tool_name` to get the full input schema of one operation. Matching composite tools, \
         which run several operations in one call (uploading a file as an attachment, waiting \
         for a background operation), are listed separately in `composite_tools`.\n\n\
-        If the tool is registered, call it directly. If only its toolset is disabled, call the \
-        same method and path with `api_request`, or ask the user to add the toolset. If it needs \
-        a higher access level, ask the user to restart the server with the named flag.\n\n\
+        If the tool is registered, call it directly. If only its toolset is disabled, enable it \
+        with `enable_toolset` when the server offers that tool, or call the same method and path \
+        with `api_request`, or ask the user to add the toolset. If it needs a higher access \
+        level, ask the user to restart the server with the named flag. Registered operation \
+        tools and `api_request` accept an optional `jq` filter to shrink the response.\n\n\
         Access: read-only (does not call the API).";
     let mut tool = Tool::new(API_SEARCH_TOOL, description, Arc::new(schema));
     tool.title = Some("Search Wiki API operations".to_owned());
@@ -510,6 +513,7 @@ fn composite_entry(composite: Composite, registry: &ToolRegistry, full: bool) ->
             access: composite.access(),
             toolset: composite.toolset(),
             local_files: composite.uses_local_files(),
+            remote_only: composite.remote_only(),
         },
         registry,
     );
@@ -565,6 +569,8 @@ struct Availability {
     access: AccessLevel,
     toolset: &'static str,
     local_files: bool,
+    /// Только для HTTP-режима ([`Composite::remote_only`]).
+    remote_only: bool,
 }
 
 impl Availability {
@@ -574,6 +580,7 @@ impl Availability {
             access: op.access,
             toolset: op.toolset,
             local_files: uses_local_files(op),
+            remote_only: false,
         }
     }
 }
@@ -588,7 +595,14 @@ fn insert_availability(entry: &mut Map<String, Value>, op: Availability, registr
     if !registry.local_files() && op.local_files {
         entry.insert(
             "note".into(),
-            json!("Not available on this server: it reads or writes a local file, and this server runs on another machine (HTTP mode). Ask the user to upload or download the file in Wiki, or to use a local (stdio) `wiki-mcp serve`."),
+            json!("Not available on this server: it reads or writes a local file, and this server runs on another machine (HTTP mode). To attach a file from your machine use `create_upload_url`; to download one, ask the user to do it in Wiki, or to use a local (stdio) `wiki-mcp serve`."),
+        );
+        return;
+    }
+    if registry.local_files() && op.remote_only {
+        entry.insert(
+            "note".into(),
+            json!("Only on a remote server (`wiki-mcp serve --http`). This server runs on your machine: attach a local file with `upload_attachment`."),
         );
         return;
     }
@@ -597,7 +611,31 @@ fn insert_availability(entry: &mut Map<String, Value>, op: Availability, registr
     if !access_ok {
         flags.push(access_flag(op.access).to_owned());
     }
-    if !registry.toolset_enabled(op.toolset) {
+    if registry.is_dynamic() {
+        // Набор агент включает сам; флаг нужен только для уровня доступа.
+        if access_ok {
+            entry.insert(
+                "enable_with".into(),
+                json!(format!(
+                    "{ENABLE_TOOLSET_TOOL} {{\"toolset\": \"{}\"}}",
+                    op.toolset
+                )),
+            );
+            // У составного инструмента нет одного метода и пути для `api_request`.
+            let note = if Composite::find(op.name).is_some() {
+                format!(
+                    "Its toolset is not enabled: call `{ENABLE_TOOLSET_TOOL}` with this toolset."
+                )
+            } else {
+                format!(
+                    "Its toolset is not enabled: call `{ENABLE_TOOLSET_TOOL}` with this toolset, \
+                     or call the same method and path with `api_request`."
+                )
+            };
+            entry.insert("note".into(), json!(note));
+            return;
+        }
+    } else if !registry.toolset_enabled(op.toolset) {
         flags.push(format!("--toolsets {}", op.toolset));
     }
     entry.insert("enable_with".into(), json!(flags.join(" ")));
@@ -893,7 +931,19 @@ mod tests {
         }
         // Набор без запроса — все его составные инструменты.
         let result = run(json!({"toolset": "attachments"}), &read).unwrap();
-        assert_eq!(composite_names(&result), ["upload_attachment"]);
+        assert_eq!(
+            composite_names(&result),
+            ["upload_attachment", "create_upload_url"]
+        );
+        // Адрес загрузки на сервере на машине агента не зарегистрирован и не включается
+        // флагом: подсказка ведёт к `upload_attachment`.
+        let url = &result["composite_tools"][1];
+        assert_eq!(url["registered"], false);
+        assert!(url.get("enable_with").is_none(), "{url}");
+        assert!(
+            url["note"].as_str().unwrap().contains("upload_attachment"),
+            "{url}"
+        );
 
         let result = run(json!({"tool_name": "upload_attachment"}), &read).unwrap();
         assert_eq!(result["tool_name"], "upload_attachment");
@@ -979,13 +1029,45 @@ mod tests {
             max_access: AccessLevel::Destructive,
             toolsets: Some(vec!["all".into()]),
             local_machine: false,
-            profile: None,
+            ..ServerOptions::default()
         })
         .unwrap();
         let result = run(json!({"tool_name": "upload_file_part"}), &remote).unwrap();
         assert_eq!(result["registered"], false);
         assert!(result["note"].as_str().unwrap().contains("HTTP mode"));
         assert!(result.get("enable_with").is_none());
+    }
+
+    #[test]
+    fn dynamic_mode_suggests_enable_toolset() {
+        let dynamic = ToolRegistry::new(&ServerOptions {
+            max_access: AccessLevel::Write,
+            dynamic_toolsets: true,
+            ..ServerOptions::default()
+        })
+        .unwrap();
+        let result = run(json!({"tool_name": "get_page"}), &dynamic).unwrap();
+        assert_eq!(result["registered"], false);
+        assert_eq!(
+            result["enable_with"],
+            r#"enable_toolset {"toolset": "pages"}"#
+        );
+        let note = result["note"].as_str().unwrap();
+        assert!(note.contains("`enable_toolset`"), "{note}");
+        assert!(note.contains("`api_request`"), "{note}");
+
+        // Составной инструмент включается своим набором; одного пути для `api_request` нет.
+        let result = run(json!({"tool_name": "upload_attachment"}), &dynamic).unwrap();
+        assert_eq!(
+            result["enable_with"],
+            r#"enable_toolset {"toolset": "attachments"}"#
+        );
+        let note = result["note"].as_str().unwrap();
+        assert!(!note.contains("api_request"), "{note}");
+
+        // Выше уровня доступа — только флаг сервера, без `--toolsets`.
+        let result = run(json!({"tool_name": "delete_page"}), &dynamic).unwrap();
+        assert_eq!(result["enable_with"], "--allow-destructive");
     }
 
     #[test]

@@ -151,8 +151,16 @@ impl ServerSpec {
 pub fn is_own_command(command: &str) -> bool {
     // Разделители обеих систем: конфиг мог быть записан на другой ОС.
     let file = command.rsplit(['/', '\\']).next().unwrap_or(command);
-    let stem = file.strip_suffix(".exe").unwrap_or(file);
-    stem == EXE_STEM
+    // Имя с `.exe` — путь Windows, где регистр в именах файлов не различается
+    // (`WIKI-MCP.EXE` — тот же файл). Без `.exe` имя сравнивается точно.
+    match file.len().checked_sub(".exe".len()) {
+        Some(split)
+            if file.is_char_boundary(split) && file[split..].eq_ignore_ascii_case(".exe") =>
+        {
+            file[..split].eq_ignore_ascii_case(EXE_STEM)
+        }
+        _ => file == EXE_STEM,
+    }
 }
 
 /// Склеивает аргументы в строку для показа, экранируя их как в POSIX shell.
@@ -249,6 +257,20 @@ mod tests {
         assert!(is_own_command("/opt/homebrew/bin/wiki-mcp"));
         assert!(is_own_command(r"C:\tools\wiki-mcp.exe"));
         assert!(is_own_command("wiki-mcp"));
+        // Пути Windows: регистр не важен, разделители `\` и `/`, путь из `%LOCALAPPDATA%`.
+        assert!(is_own_command(r"C:\Tools\WIKI-MCP.EXE"));
+        assert!(is_own_command(
+            r"C:\Users\u\AppData\Local\Programs\wiki-mcp\wiki-mcp.exe"
+        ));
+        assert!(is_own_command("C:/tools/Wiki-Mcp.Exe"));
+        assert!(is_own_command("wiki-mcp.exe"));
+        assert!(!is_own_command(r"C:\tools\wiki-mcp-old.exe"));
+        assert!(!is_own_command(r"C:\tools\wiki-mcp.exe.bak"));
+        assert!(!is_own_command(r"C:\wiki-mcp\node.exe"));
+        // Без `.exe` имя сравнивается точно: в Unix это другой файл.
+        assert!(!is_own_command("/usr/local/bin/Wiki-MCP"));
+        assert!(!is_own_command(".exe"));
+        assert!(!is_own_command("вики.exe"));
         assert!(!is_own_command("/usr/bin/node"));
         assert!(!is_own_command("/opt/legacy-wiki/dist/index.js"));
         assert!(!is_own_command("yandex_wiki_mcp"));

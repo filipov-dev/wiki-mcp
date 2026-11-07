@@ -122,6 +122,48 @@ pub fn save_to_path(value: &Value, files: &FilePolicy) -> Result<std::path::Path
         .map_err(|err| ToolError::new(format!("argument `{SAVE_TO_ARG}`: {err}")))
 }
 
+/// Проверяет значение аргумента операции заранее, без сборки запроса: так пользовательский
+/// инструмент с фиксированными аргументами (`tools.toml`) отклоняется при загрузке, а не при
+/// первом вызове. Файловые аргументы и `save_to` фиксировать нельзя: пути должен проверять
+/// [`FilePolicy`] при каждом вызове.
+pub fn check_fixed_argument(op: &OperationDef, name: &str, value: &Value) -> Result<(), ToolError> {
+    if name == SAVE_TO_ARG && takes_save_to(op) {
+        return Err(ToolError::new(format!(
+            "argument `{SAVE_TO_ARG}` cannot be fixed: the agent passes a new file path on every \
+             call"
+        )));
+    }
+    let Some(param) = op.params.iter().find(|param| param.name == name) else {
+        let names: Vec<String> = op
+            .params
+            .iter()
+            .map(|param| format!("`{}`", param.name))
+            .collect();
+        return Err(ToolError::new(format!(
+            "operation `{}` has no argument `{name}`; its arguments: {}",
+            op.tool_name,
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.join(", ")
+            }
+        )));
+    };
+    if value.is_null() {
+        return Err(ToolError::new(format!(
+            "argument `{name}` cannot be fixed to null; remove it instead"
+        )));
+    }
+    match param.location {
+        ParamLocation::Path => scalar(param, value).map(|_| ()),
+        ParamLocation::Query => query_values(param, value).map(|_| ()),
+        ParamLocation::Body if param.value_type == ParamType::File => Err(ToolError::new(format!(
+            "file argument `{name}` cannot be fixed: local paths are checked on every call"
+        ))),
+        ParamLocation::Body => json_body(param, value).map(|_| ()),
+    }
+}
+
 fn reject_unknown(op: &OperationDef, args: &JsonObject) -> Result<(), ToolError> {
     let allowed = |key: &str| {
         op.params.iter().any(|param| param.name == key) || (takes_save_to(op) && key == SAVE_TO_ARG)

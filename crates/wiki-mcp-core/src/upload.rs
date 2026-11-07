@@ -21,11 +21,19 @@
 //! память только эту часть. Путь проверяет [`FilePolicy::check_read`] (разрешённые
 //! каталоги) до создания сессии. Если файл изменил размер во время загрузки, сессия
 //! отменяется.
+//!
+//! Те же шаги выполняет загрузка из потока ([`run_stream`]): файл, который агент отправил
+//! на одноразовый адрес HTTP-сервера ([`crate::upload_url`]). Тогда очередная часть читается
+//! из потока в память (не больше 16 МиБ на загрузку) и уходит телом [`RequestBody::Bytes`];
+//! на диск ничего не пишется. Поток короче или длиннее заявленного размера — ошибка, сессия
+//! отменяется.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rmcp::model::JsonObject;
 use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use wiki_api::executor::{ApiClient, ApiRequest, MAX_FILE_BODY_BYTES, RequestBody, render_path};
 
 use crate::composite::{
@@ -58,6 +66,9 @@ pub const MAX_PARTS: u64 = 10_000;
 const MULTIPART_STORAGES: &[&str] = &["s3", "custom_s3"];
 
 const MIB: u64 = 1024 * 1024;
+
+/// Сколько ждать одну часть файла из потока (до 16 МиБ): не меньше ~55 КиБ/с.
+pub const PART_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Часть файла: номер (с 1), смещение и длина в байтах.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +156,7 @@ pub(crate) async fn run(
     // Запрос прикрепления собирается заранее: неверный `idx` (не число) отклоняется до
     // создания сессии и загрузки файла. Есть ли такая страница, скажет только Wiki на
     // последнем шаге — тогда сессия отменяется.
-    let mut attach = build_request(
+    let attach = build_request(
         step_operation(ATTACH)?,
         &object(json!({"idx": idx, "body": {"upload_sessions": []}})),
         files,
@@ -164,15 +175,115 @@ pub(crate) async fn run(
              uploaded"
         )));
     }
+    let (result, redactions) = transfer(
+        client,
+        files,
+        attach,
+        &file_name,
+        size,
+        &mut Source::File(&path),
+    )
+    .await?;
+    Ok(with_note(result.to_string(), &redactions))
+}
+
+/// Куда загрузить файл из потока: страница, имя вложения и точный размер.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadTarget {
+    /// Числовой ID страницы.
+    pub idx: u64,
+    /// Имя вложения в Wiki.
+    pub file_name: String,
+    /// Точный размер файла, байт (от 1).
+    pub file_size: u64,
+}
+
+/// Почему не удалась загрузка из потока: от этого зависит HTTP-статус ответа отправителю.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFailure {
+    /// Поток закончился раньше заявленного размера или оборвался.
+    Incomplete,
+    /// В потоке больше байт, чем заявлено.
+    TooLarge,
+    /// Ошибка шага Wiki API.
+    Wiki,
+}
+
+/// Ошибка загрузки из потока: причина и текст для отправителя (без учётных данных).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamUploadError {
+    pub failure: StreamFailure,
+    pub message: String,
+}
+
+impl From<ToolError> for StreamUploadError {
+    fn from(err: ToolError) -> Self {
+        Self {
+            failure: StreamFailure::Wiki,
+            message: err.message().to_owned(),
+        }
+    }
+}
+
+/// Загружает файл из потока `reader` (ровно `target.file_size` байт) вложением страницы
+/// `target.idx`. Результат — как у [`run`]: ответ прикрепления и `upload`, а пометка о
+/// скрытых значениях, если они есть, — в поле `note` (ответ остаётся JSON).
+pub(crate) async fn run_stream(
+    client: &ApiClient,
+    files: &FilePolicy,
+    target: &UploadTarget,
+    reader: &mut (dyn AsyncRead + Unpin + Send),
+) -> Result<Value, StreamUploadError> {
+    let attach = build_request(
+        step_operation(ATTACH)?,
+        &object(json!({"idx": target.idx, "body": {"upload_sessions": []}})),
+        files,
+    )?;
+    let mut stream = StreamSource {
+        reader,
+        failure: None,
+    };
+    let result = transfer(
+        client,
+        files,
+        attach,
+        &target.file_name,
+        target.file_size,
+        &mut Source::Stream(&mut stream),
+    )
+    .await;
+    match result {
+        Ok((mut value, redactions)) => {
+            if let (Value::Object(map), Some(note)) = (&mut value, redactions.note()) {
+                map.insert("note".to_owned(), Value::String(note));
+            }
+            Ok(value)
+        }
+        Err(err) => Err(StreamUploadError {
+            failure: stream.failure.unwrap_or(StreamFailure::Wiki),
+            message: err.message().to_owned(),
+        }),
+    }
+}
+
+/// Сессия загрузки, части, завершение и прикрепление; при ошибке после создания сессии
+/// сессия отменяется. Результат — ответ прикрепления с `upload`.
+async fn transfer(
+    client: &ApiClient,
+    files: &FilePolicy,
+    mut attach: ApiRequest,
+    file_name: &str,
+    size: u64,
+    source: &mut Source<'_, '_>,
+) -> Result<(Value, Redactions), ToolError> {
     let parts = plan_parts(size);
     if parts.len() as u64 > MAX_PARTS {
         return Err(ToolError::new(format!(
-            "local file `{file_arg}` has {size} bytes: more than {MAX_PARTS} parts of {} MiB, \
-             the limit of a Wiki upload session; nothing was uploaded",
+            "the file has {size} bytes: more than {MAX_PARTS} parts of {} MiB, the limit of a \
+             Wiki upload session; nothing was uploaded",
             PART_BYTES / MIB
         )));
     }
-
     let mut redactions = Redactions::default();
     let create = build_request(
         step_operation(CREATE)?,
@@ -201,11 +312,16 @@ pub(crate) async fn run(
         client,
         files,
         session_id: &session_id,
-        path: &path,
         size,
     };
     let attached = match upload
-        .send(&parts, storage.as_deref(), &mut attach, &mut redactions)
+        .send(
+            source,
+            &parts,
+            storage.as_deref(),
+            &mut attach,
+            &mut redactions,
+        )
         .await
     {
         Ok(attached) => attached,
@@ -232,7 +348,99 @@ pub(crate) async fn run(
         }
         other => json!({"response": other, "upload": summary}),
     };
-    Ok(with_note(result.to_string(), &redactions))
+    Ok((result, redactions))
+}
+
+/// Откуда берутся части файла.
+enum Source<'a, 'r> {
+    /// Локальный файл: канонический путь, проверенный [`FilePolicy::check_read`].
+    File(&'a Path),
+    /// Поток (тело HTTP-запроса).
+    Stream(&'a mut StreamSource<'r>),
+}
+
+/// Поток и причина ошибки чтения: через [`ToolError`] её не передать.
+struct StreamSource<'r> {
+    reader: &'r mut (dyn AsyncRead + Unpin + Send),
+    failure: Option<StreamFailure>,
+}
+
+impl StreamSource<'_> {
+    fn fail(&mut self, failure: StreamFailure, message: String) -> ToolError {
+        self.failure = Some(failure);
+        ToolError::new(message)
+    }
+
+    /// Ровно `part.len` байт части из потока.
+    async fn read_part(&mut self, part: &Part, size: u64) -> Result<Vec<u8>, ToolError> {
+        // Часть не больше 16 МиБ (`plan_parts`): приведение к `usize` без потерь.
+        let mut bytes = Vec::with_capacity(part.len as usize);
+        // Без срока зависший отправитель держал бы место среди активных адресов и буфер.
+        let read = tokio::time::timeout(
+            PART_READ_TIMEOUT,
+            (&mut *self.reader).take(part.len).read_to_end(&mut bytes),
+        )
+        .await;
+        let received = part.offset + bytes.len() as u64;
+        let read = match read {
+            Ok(read) => read,
+            Err(_) => {
+                return Err(self.fail(
+                    StreamFailure::Incomplete,
+                    format!(
+                        "the file could not be received: no {} MiB part arrived within {} \
+                         seconds ({received} of {size} bytes received); nothing was attached",
+                        PART_BYTES / MIB,
+                        PART_READ_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        };
+        match read {
+            Err(err) => {
+                tracing::debug!(%err, "не удалось прочитать тело запроса с файлом");
+                Err(self.fail(
+                    StreamFailure::Incomplete,
+                    format!(
+                        "the file could not be received: the request body broke off after \
+                         {received} of {size} bytes; nothing was attached"
+                    ),
+                ))
+            }
+            Ok(_) if received < part.offset + part.len => Err(self.fail(
+                StreamFailure::Incomplete,
+                format!(
+                    "the request body has {received} bytes, but the upload URL was created for \
+                     {size} bytes; nothing was attached"
+                ),
+            )),
+            Ok(_) => Ok(bytes),
+        }
+    }
+
+    /// После всех частей поток должен закончиться.
+    async fn ensure_finished(&mut self, size: u64) -> Result<(), ToolError> {
+        let mut extra = [0_u8; 1];
+        match self.reader.read(&mut extra).await {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(self.fail(
+                StreamFailure::TooLarge,
+                format!(
+                    "the request body is longer than {size} bytes, the size the upload URL was \
+                     created for; nothing was attached"
+                ),
+            )),
+            Err(err) => {
+                tracing::debug!(%err, "не удалось дочитать тело запроса с файлом");
+                Err(self.fail(
+                    StreamFailure::Incomplete,
+                    "the file could not be received: the request body broke off at the end; \
+                     nothing was attached"
+                        .to_owned(),
+                ))
+            }
+        }
+    }
 }
 
 /// Загрузка в созданную сессию.
@@ -240,8 +448,6 @@ struct Upload<'a> {
     client: &'a ApiClient,
     files: &'a FilePolicy,
     session_id: &'a str,
-    /// Канонический путь, проверенный [`FilePolicy::check_read`].
-    path: &'a Path,
     size: u64,
 }
 
@@ -249,6 +455,7 @@ impl Upload<'_> {
     /// Части, завершение и прикрепление; ответ прикрепления.
     async fn send(
         &self,
+        source: &mut Source<'_, '_>,
         parts: &[Part],
         storage: Option<&str>,
         attach: &mut ApiRequest,
@@ -266,7 +473,17 @@ impl Upload<'_> {
         }
         let total = parts.len();
         for part in parts {
-            let request = self.part_request(part)?;
+            let body = match source {
+                Source::File(path) => RequestBody::FilePart {
+                    path: path.to_path_buf(),
+                    offset: part.offset,
+                    len: part.len,
+                },
+                Source::Stream(stream) => {
+                    RequestBody::Bytes(stream.read_part(part, self.size).await?.into())
+                }
+            };
+            let request = self.part_request(part, body)?;
             call_json(self.client, request, redactions)
                 .await
                 .map_err(|err| {
@@ -274,14 +491,21 @@ impl Upload<'_> {
                     step_failed(UPLOAD_PART, &err, Some(&context))
                 })?;
         }
-        // Файл, изменивший размер во время загрузки, в Wiki не нужен: части от разных версий.
-        let now = file_size(self.path).await?;
-        if now != self.size {
-            return Err(ToolError::new(format!(
-                "the local file changed during the upload ({} bytes before, {now} bytes now); \
-                 nothing was attached",
-                self.size
-            )));
+        match source {
+            // Файл, изменивший размер во время загрузки, в Wiki не нужен: части от разных
+            // версий.
+            Source::File(path) => {
+                let now = file_size(path).await?;
+                if now != self.size {
+                    return Err(ToolError::new(format!(
+                        "the local file changed during the upload ({} bytes before, {now} bytes \
+                         now); nothing was attached",
+                        self.size
+                    )));
+                }
+            }
+            // Лишние байты в потоке — не тот файл, который заявлен.
+            Source::Stream(stream) => stream.ensure_finished(self.size).await?,
         }
         let finish = build_request(
             step_operation(FINISH)?,
@@ -297,19 +521,15 @@ impl Upload<'_> {
             .map_err(|err| step_failed(ATTACH, &err, None))
     }
 
-    /// Запрос загрузки части: путь и метод — из операции, тело — диапазон файла.
-    fn part_request(&self, part: &Part) -> Result<ApiRequest, ToolError> {
+    /// Запрос загрузки части: путь и метод — из операции, тело — часть файла.
+    fn part_request(&self, part: &Part, body: RequestBody) -> Result<ApiRequest, ToolError> {
         let op = step_operation(UPLOAD_PART)?;
         let path = render_path(op.path, |name| {
             (name == "session_id").then(|| self.session_id.to_owned())
         })?;
         let mut request = ApiRequest::new(op.method, path);
         request.query = vec![("part_number".to_owned(), part.number.to_string())];
-        request.body = RequestBody::FilePart {
-            path: self.path.to_path_buf(),
-            offset: part.offset,
-            len: part.len,
-        };
+        request.body = body;
         Ok(request)
     }
 

@@ -5,9 +5,12 @@
 //!   создания сессии сессия отменяется.
 //! - [`WAIT_FOR_OPERATION_TOOL`] — ожидание фоновой операции (копирование страницы или
 //!   таблицы, перенос страниц) с тайм-аутом ([`crate::wait`]).
+//! - [`CREATE_UPLOAD_URL_TOOL`] — одноразовый адрес HTTP-сервера, на который агент сам
+//!   отправляет файл; сервер загружает его вложением страницы ([`crate::upload_url`]).
 //!
 //! Составной инструмент регистрируется по тем же правилам, что операция: уровень доступа,
-//! набор инструментов и, для загрузки, работа с локальными файлами (в HTTP-режиме его нет).
+//! набор инструментов и машина сервера: загрузка локального файла — только на машине агента
+//! (stdio), одноразовый адрес — только в HTTP-режиме.
 //! Шаги строятся из операций спецификации (`step_operation` и
 //! [`crate::request::build_request`]) и выполняются через
 //! `server::execute_redacted`, поэтому пути, проверка аргументов и вырезание
@@ -25,13 +28,16 @@ use crate::error::ToolError;
 use crate::files::FilePolicy;
 use crate::redact::Redactions;
 use crate::server::execute_redacted;
-use crate::{upload, wait};
+use crate::{upload, upload_url, wait};
 
 /// Имя инструмента загрузки файла вложением страницы.
 pub const UPLOAD_ATTACHMENT_TOOL: &str = "upload_attachment";
 
 /// Имя инструмента ожидания фоновой операции.
 pub const WAIT_FOR_OPERATION_TOOL: &str = "wait_for_operation";
+
+/// Имя инструмента одноразового адреса загрузки файла (HTTP-режим).
+pub const CREATE_UPLOAD_URL_TOOL: &str = "create_upload_url";
 
 /// Составной инструмент.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,11 +46,17 @@ pub enum Composite {
     UploadAttachment,
     /// [`WAIT_FOR_OPERATION_TOOL`].
     WaitForOperation,
+    /// [`CREATE_UPLOAD_URL_TOOL`].
+    CreateUploadUrl,
 }
 
 impl Composite {
     /// Все составные инструменты в порядке регистрации.
-    pub const ALL: [Composite; 2] = [Self::UploadAttachment, Self::WaitForOperation];
+    pub const ALL: [Composite; 3] = [
+        Self::UploadAttachment,
+        Self::WaitForOperation,
+        Self::CreateUploadUrl,
+    ];
 
     /// Составной инструмент по имени.
     pub fn find(name: &str) -> Option<Self> {
@@ -55,13 +67,14 @@ impl Composite {
         match self {
             Self::UploadAttachment => UPLOAD_ATTACHMENT_TOOL,
             Self::WaitForOperation => WAIT_FOR_OPERATION_TOOL,
+            Self::CreateUploadUrl => CREATE_UPLOAD_URL_TOOL,
         }
     }
 
     /// Уровень доступа: самый высокий из уровней шагов.
     pub fn access(self) -> AccessLevel {
         match self {
-            Self::UploadAttachment => AccessLevel::Write,
+            Self::UploadAttachment | Self::CreateUploadUrl => AccessLevel::Write,
             Self::WaitForOperation => AccessLevel::Read,
         }
     }
@@ -69,7 +82,7 @@ impl Composite {
     /// Набор инструментов: тот, где живут операции шагов (вложения; копирование страниц).
     pub fn toolset(self) -> &'static str {
         match self {
-            Self::UploadAttachment => "attachments",
+            Self::UploadAttachment | Self::CreateUploadUrl => "attachments",
             Self::WaitForOperation => "pages",
         }
     }
@@ -79,11 +92,18 @@ impl Composite {
         matches!(self, Self::UploadAttachment)
     }
 
+    /// Нужен ли инструменту HTTP-транспорт (на машине агента, в stdio, он не регистрируется:
+    /// там файл загружает `upload_attachment`).
+    pub fn remote_only(self) -> bool {
+        matches!(self, Self::CreateUploadUrl)
+    }
+
     /// Краткое название.
     pub fn summary(self) -> &'static str {
         match self {
             Self::UploadAttachment => "Upload a local file as a page attachment",
             Self::WaitForOperation => "Wait for a background operation",
+            Self::CreateUploadUrl => "Create a one-time URL to upload a file as an attachment",
         }
     }
 
@@ -92,6 +112,7 @@ impl Composite {
         match self {
             Self::UploadAttachment => upload::STEPS,
             Self::WaitForOperation => wait::STEPS,
+            Self::CreateUploadUrl => upload_url::STEPS,
         }
     }
 
@@ -107,6 +128,10 @@ impl Composite {
                 "дождаться ждать ожидание статус фоновой асинхронной операции копирование \
                  копии страницы таблицы перенос переноса страниц"
             }
+            Self::CreateUploadUrl => {
+                "загрузить загрузка отправить файл файла вложение прикрепить приложить на \
+                 страницу адрес ссылка одноразовый curl большой"
+            }
         }
     }
 
@@ -115,6 +140,7 @@ impl Composite {
         match self {
             Self::UploadAttachment => upload::description(),
             Self::WaitForOperation => wait::description(),
+            Self::CreateUploadUrl => upload_url::description(),
         }
     }
 
@@ -123,6 +149,7 @@ impl Composite {
         let schema = match self {
             Self::UploadAttachment => upload::input_schema(),
             Self::WaitForOperation => wait::input_schema(),
+            Self::CreateUploadUrl => upload_url::input_schema(),
         };
         match schema {
             Value::Object(map) => map,
@@ -152,6 +179,9 @@ impl Composite {
     }
 
     /// Выполняет инструмент. Текст ответа уже без учётных данных, с пометкой о замене.
+    ///
+    /// [`Self::CreateUploadUrl`] нужны ещё адреса транспорта и учётные данные запроса: его
+    /// вызывает сервер напрямую ([`upload_url::run`]).
     pub(crate) async fn call(
         self,
         client: &ApiClient,
@@ -161,6 +191,9 @@ impl Composite {
         match self {
             Self::UploadAttachment => upload::run(client, files, args).await,
             Self::WaitForOperation => wait::run(client, files, args).await,
+            Self::CreateUploadUrl => Err(ToolError::new(
+                "internal error: `create_upload_url` is handled by the server",
+            )),
         }
     }
 }
@@ -281,6 +314,9 @@ mod tests {
         assert_eq!(Composite::find("get_page"), None);
         assert_eq!(Composite::UploadAttachment.access(), AccessLevel::Write);
         assert_eq!(Composite::WaitForOperation.access(), AccessLevel::Read);
+        assert_eq!(Composite::CreateUploadUrl.access(), AccessLevel::Write);
+        assert!(Composite::CreateUploadUrl.remote_only());
+        assert!(!Composite::CreateUploadUrl.uses_local_files());
     }
 
     #[test]

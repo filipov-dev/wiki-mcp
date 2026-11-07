@@ -18,6 +18,9 @@
 //! Сервер без состояния (stateless Streamable HTTP, ответы `application/json`): сессий нет,
 //! каждый POST обрабатывается независимо, поэтому токен одного запроса не переживает его.
 //! `rmcp` повторно проверяет `Host` и `Origin` с теми же списками и ограничивает размер тела.
+//!
+//! Одноразовые адреса загрузки файлов (`/uploads/...`, инструмент `create_upload_url`) —
+//! в [`uploads`]: тот же слой [`guard`], токен — из заголовка запроса с файлом.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,6 +41,10 @@ use tokio_util::sync::CancellationToken;
 use wiki_api::executor::{Credentials, OrgId};
 use wiki_api::{ApiToken, OrgKind, Organization};
 use wiki_mcp_core::{RequestAuth, TokenSource, WikiServer};
+
+mod uploads;
+
+pub use uploads::upload_urls;
 
 /// Адрес по умолчанию: только локальные подключения.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8767";
@@ -101,8 +108,10 @@ pub fn allowed_hosts(listen: SocketAddr, extra: &[String]) -> Vec<String> {
     hosts
 }
 
-/// Маршруты сервера: `/mcp` (с токеном) и `/health` (без токена).
+/// Маршруты сервера: `/mcp` (с токеном), `/health` (без токена) и, если к серверу подключены
+/// адреса загрузки, `/uploads/...` (с токеном).
 pub fn router(server: WikiServer, options: &HttpOptions, cancel: CancellationToken) -> Router {
+    let upload_server = server.upload_urls().is_some().then(|| server.clone());
     let config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(options.allowed_hosts.clone())
         .with_allowed_origins(options.allowed_origins.clone())
@@ -124,12 +133,20 @@ pub fn router(server: WikiServer, options: &HttpOptions, cancel: CancellationTok
         allowed_origins: options.allowed_origins.clone(),
         org: options.org.clone(),
     });
-    let mcp_routes = Router::new()
-        .route_service(MCP_PATH, mcp)
-        .route_layer(middleware::from_fn_with_state(guard_state, guard));
-    Router::new()
+    let mcp_routes =
+        Router::new()
+            .route_service(MCP_PATH, mcp)
+            .route_layer(middleware::from_fn_with_state(
+                Arc::clone(&guard_state),
+                guard,
+            ));
+    let mut app = Router::new()
         .route(HEALTH_PATH, get(health))
-        .merge(mcp_routes)
+        .merge(mcp_routes);
+    if let Some(server) = upload_server {
+        app = app.merge(uploads::routes(server, guard_state));
+    }
+    app
 }
 
 /// Запускает сервер и ждёт SIGINT/SIGTERM.
@@ -238,7 +255,8 @@ enum Rejection {
     OrgNotAllowed,
 }
 
-/// Слой `/mcp`: без допустимых `Host`/`Origin`, токена и организации запрос не доходит до MCP.
+/// Слой `/mcp` и `/uploads/...`: без допустимых `Host`/`Origin`, токена и организации запрос
+/// не доходит до обработчика.
 ///
 /// `Authorization` и заголовки организации убираются из запроса, а их значения кладутся в
 /// расширения как [`RequestAuthExt`]: так исходные заголовки не попадут ни в какой отладочный

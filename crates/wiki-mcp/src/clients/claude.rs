@@ -31,16 +31,25 @@ pub trait CommandRunner {
 #[derive(Debug, Default)]
 pub struct SystemRunner;
 
+/// Запасное имя программы, если `program` не нашлась.
+///
+/// На Windows `Command` ищет в PATH только `<имя>.exe`, а установка Claude Code через npm
+/// кладёт обёртку `claude.cmd` (нативный установщик — `claude.exe`, его находит первая
+/// попытка). Rust экранирует аргументы для `.cmd` сам и отказывается запускать, если
+/// безопасно экранировать нельзя. В других ОС и при других ошибках запасного имени нет.
+fn windows_cmd_fallback(program: &str, windows: bool, err: &io::Error) -> Option<String> {
+    (windows && err.kind() == io::ErrorKind::NotFound && !program.contains('.'))
+        .then(|| format!("{program}.cmd"))
+}
+
 impl CommandRunner for SystemRunner {
     fn run(&mut self, program: &str, args: &[String]) -> io::Result<CommandOutput> {
         let output = match Command::new(program).args(args).output() {
-            // На Windows `Command` ищет в PATH только `<имя>.exe`, а установка Claude Code
-            // через npm кладёт обёртку `claude.cmd`. Rust экранирует аргументы для `.cmd`
-            // сам и отказывается запускать, если безопасно экранировать нельзя.
-            Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::NotFound => {
-                Command::new(format!("{program}.cmd")).args(args).output()?
-            }
-            result => result?,
+            Err(err) => match windows_cmd_fallback(program, cfg!(windows), &err) {
+                Some(fallback) => Command::new(fallback).args(args).output()?,
+                None => return Err(err),
+            },
+            Ok(output) => output,
         };
         Ok(CommandOutput {
             success: output.status.success(),
@@ -260,6 +269,43 @@ mod tests {
             answers: values.iter().map(|value| (*value).to_owned()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn windows_falls_back_to_cmd_wrapper() {
+        let not_found = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(
+            windows_cmd_fallback(CLAUDE_PROGRAM, true, &not_found).as_deref(),
+            Some("claude.cmd")
+        );
+        // Не Windows, другая ошибка или имя уже с расширением — без повтора.
+        assert_eq!(
+            windows_cmd_fallback(CLAUDE_PROGRAM, false, &not_found),
+            None
+        );
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(windows_cmd_fallback(CLAUDE_PROGRAM, true, &denied), None);
+        assert_eq!(windows_cmd_fallback("claude.cmd", true, &not_found), None);
+    }
+
+    #[test]
+    fn windows_paths_in_argv_and_get_output() {
+        let exe = r"C:\Users\u\AppData\Local\Programs\wiki-mcp\wiki-mcp.exe";
+        let spec = ServerSpec {
+            command: exe.into(),
+            ..spec()
+        };
+        // Путь уходит в argv одним аргументом, без кавычек и экранирования.
+        let args = add_args(Scope::User, &spec);
+        assert_eq!(args[6], exe);
+        // Для показа путь с `\` берётся в кавычки, как в POSIX shell.
+        assert!(display(&args).contains(&format!("-- '{exe}' serve")));
+        // Запись с Windows-путём к wiki-mcp — своя, её можно заменить с --yes.
+        assert!(existing_is_own(&get_output(exe)));
+        assert!(existing_is_own(&get_output(r"C:\Tools\WIKI-MCP.EXE")));
+        assert!(!existing_is_own(&get_output(
+            r"C:\Program Files\nodejs\node.exe"
+        )));
     }
 
     #[test]

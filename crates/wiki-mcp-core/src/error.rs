@@ -66,6 +66,12 @@ pub fn describe_api_error(err: &ApiError) -> String {
                 .to_owned()
         }
         ApiError::MissingToken => "no Wiki token is available for this request".to_owned(),
+        // Текст ошибки источника IAM-токенов — на английском и без секретов (stderr `yc` и
+        // ответ IAM API в нём замаскированы).
+        ApiError::TokenUnavailable(detail) => format!(
+            "the server could not get a Yandex Cloud IAM token, so the request was not sent: \
+             {detail}. Ask the user to check the profile with `wiki-mcp auth status`"
+        ),
         ApiError::MissingOrg => "no Wiki organization is configured for this server; ask the \
              user to set it with `wiki-mcp auth login --org-id <ID>` (Yandex 360) or \
              `--cloud-org-id <ID>` (Yandex Cloud)"
@@ -320,6 +326,12 @@ mod tests {
         let text = describe_api_error(&ApiError::InvalidRequest("файл уже есть".into()));
         assert!(!text.contains("файл"), "{text}");
         assert!(describe_api_error(&ApiError::MissingOrg).contains("--org-id"));
+        let text = describe_api_error(&ApiError::TokenUnavailable("`yc` failed".into()));
+        assert!(
+            text.contains("IAM token") && text.contains("`yc` failed"),
+            "{text}"
+        );
+        assert!(text.contains("auth status"), "{text}");
         let text = describe_api_error(&ApiError::ResponseTooLarge { limit: 1024 });
         assert!(
             text.contains("1024 bytes") && text.contains("`page_size`"),

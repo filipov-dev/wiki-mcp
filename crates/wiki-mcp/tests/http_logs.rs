@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 const TOKEN: &str = "log-secret-token-91ab";
 const ORG: &str = "log-secret-org-77";
 const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Узнаваемые идентификатор и секрет адреса загрузки.
+const UPLOAD_ID: &str = "0123456789abcdef0123456789abcdef";
+const UPLOAD_SECRET: &str = "5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7";
 
 /// Останавливает сервер, даже если тест упал.
 struct Child(std::process::Child);
@@ -136,6 +139,23 @@ async fn token_and_org_never_appear_in_logs() {
         let text = response.text().await.unwrap();
         assert!(!text.contains(TOKEN) && !text.contains(ORG), "{text}");
     }
+    // Адрес загрузки файла: путь с секретом в логи не попадает. Адрес неизвестен (создать
+    // настоящий нельзя без Wiki API), поэтому ответ — 404 после всех проверок заголовков.
+    let upload = endpoint.replace("/mcp", &format!("/uploads/{UPLOAD_ID}/{UPLOAD_SECRET}"));
+    let response = http
+        .put(&upload)
+        .header("authorization", format!("OAuth {TOKEN}"))
+        .header("x-cloud-org-id", ORG)
+        .body("file content")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 404);
+    let text = response.text().await.unwrap();
+    assert!(
+        !text.contains(UPLOAD_SECRET) && !text.contains(TOKEN),
+        "{text}"
+    );
 
     drop(child);
     reader.join().unwrap();
@@ -148,4 +168,6 @@ async fn token_and_org_never_appear_in_logs() {
     assert!(logs.contains("TRACE") || logs.contains("DEBUG"), "{logs}");
     assert!(!logs.contains(TOKEN), "{logs}");
     assert!(!logs.contains(ORG), "{logs}");
+    assert!(!logs.contains(UPLOAD_SECRET), "{logs}");
+    assert!(!logs.contains(UPLOAD_ID), "{logs}");
 }

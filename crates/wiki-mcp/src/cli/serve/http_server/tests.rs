@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use wiki_api::AccessLevel;
 use wiki_api::executor::{ApiClient, ClientConfig};
-use wiki_mcp_core::{FilePolicy, ServerOptions, WikiServer};
+use wiki_mcp_core::{FilePolicy, ServerOptions, UploadUrlLimits, UploadUrls, WikiServer};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
@@ -18,6 +18,8 @@ struct TestServer {
     base: String,
     http: reqwest::Client,
     cancel: CancellationToken,
+    /// Адреса загрузки сервера.
+    uploads: Option<Arc<UploadUrls>>,
 }
 
 impl Drop for TestServer {
@@ -31,6 +33,7 @@ struct Settings<'a> {
     origins: &'a [&'a str],
     org: Option<OrgId>,
     max_request_bytes: usize,
+    uploads: UploadUrlLimits,
 }
 
 impl Default for Settings<'_> {
@@ -40,6 +43,7 @@ impl Default for Settings<'_> {
             origins: &[],
             org: None,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            uploads: UploadUrlLimits::default(),
         }
     }
 }
@@ -59,11 +63,21 @@ async fn start(api: &MockServer, settings: Settings<'_>) -> TestServer {
             toolsets: Some(vec!["pages".into(), "attachments".into()]),
             local_machine: false,
             profile: None,
+            ..ServerOptions::default()
         },
         FilePolicy::new(&[dir]).unwrap(),
         token_source(),
     )
     .unwrap();
+    let urls = Arc::new(
+        UploadUrls::new(
+            settings.uploads,
+            Box::new(uploads::base_url),
+            settings.org.is_none(),
+        )
+        .unwrap(),
+    );
+    let server = server.with_upload_urls(Arc::clone(&urls));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let options = HttpOptions {
@@ -84,6 +98,7 @@ async fn start(api: &MockServer, settings: Settings<'_>) -> TestServer {
         base: format!("http://{addr}"),
         http: reqwest::Client::new(),
         cancel,
+        uploads: Some(urls),
     }
 }
 
@@ -439,6 +454,7 @@ async fn initialize_and_tools_have_no_local_machine_features() {
         toolsets: Some(vec!["pages".into(), "attachments".into()]),
         local_machine: true,
         profile: None,
+        ..ServerOptions::default()
     })
     .unwrap();
     let local_only: Vec<String> = local
@@ -721,4 +737,420 @@ fn allowed_hosts_include_specific_listen_address() {
     assert_eq!(any, ["localhost", "127.0.0.1", "::1", "wiki-mcp"]);
     let specific = allowed_hosts("10.0.0.5:8767".parse().unwrap(), &[]);
     assert_eq!(specific, ["localhost", "127.0.0.1", "::1", "10.0.0.5"]);
+}
+
+// --- Одноразовые адреса загрузки (`create_upload_url`, `/uploads/...`) ---
+
+/// Фиктивный идентификатор сессии загрузки.
+const SESSION: &str = "00000000-0000-4000-8000-000000000001";
+/// Размер части файла в сессии загрузки Wiki.
+const PART: usize = 16 * 1024 * 1024;
+
+/// Страница 42 существует (проверка при создании адреса).
+async fn mount_page(api: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/v1/pages/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 42})))
+        .mount(api)
+        .await;
+}
+
+/// Создание сессии: `times` раз.
+async fn mount_session(api: &MockServer, size: usize, times: u64) {
+    Mock::given(method("POST"))
+        .and(path("/v1/upload_sessions"))
+        .and(header("authorization", "OAuth upload-token"))
+        .and(header("x-org-id", "12345"))
+        .and(wiremock::matchers::body_json(
+            json!({"file_name": "big.bin", "file_size": size}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "session_id": SESSION,
+            "storage_type": "s3",
+        })))
+        .expect(times)
+        .mount(api)
+        .await;
+}
+
+impl TestServer {
+    /// Создаёт адрес загрузки через MCP и возвращает ответ инструмента.
+    async fn create_upload_url(&self, token: &str, args: Value) -> Value {
+        let result = self.call_tool(token, "create_upload_url", args).await;
+        assert_eq!(result["isError"], false, "{result}");
+        serde_json::from_str(&result_text(&result)).unwrap()
+    }
+
+    /// Отправка файла на адрес с OAuth-токеном и организацией Yandex 360.
+    fn put_file(&self, url: &str, token: &str, body: Vec<u8>) -> reqwest::RequestBuilder {
+        self.http
+            .put(url)
+            .header("authorization", format!("OAuth {token}"))
+            .header("x-org-id", "12345")
+            .body(body)
+    }
+}
+
+fn file_content(size: usize) -> Vec<u8> {
+    (0..size).map(|i| (i % 251) as u8).collect()
+}
+
+#[tokio::test]
+async fn upload_url_streams_a_large_file_to_wiki() {
+    let api = MockServer::start().await;
+    let size = PART + 1000;
+    mount_page(&api).await;
+    mount_session(&api, size, 1).await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/upload_sessions/{SESSION}/upload_part")))
+        .and(header("authorization", "OAuth upload-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "ok"})))
+        .expect(2)
+        .mount(&api)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/upload_sessions/{SESSION}/finish")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "finished"})))
+        .expect(1)
+        .mount(&api)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/upload_sessions/{SESSION}/abort")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&api)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pages/42/attachments"))
+        .and(wiremock::matchers::body_json(
+            json!({"upload_sessions": [SESSION]}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{"id": 7, "name": "big.bin", "download_url": "/files/big.bin"}]
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+    let server = start(
+        &api,
+        Settings {
+            access: AccessLevel::Write,
+            ..Settings::default()
+        },
+    )
+    .await;
+
+    let ticket = server
+        .create_upload_url(
+            "upload-token",
+            json!({"idx": 42, "file_name": "big.bin", "file_size": size}),
+        )
+        .await;
+    let url = ticket["upload_url"].as_str().unwrap();
+    assert!(
+        url.starts_with(&format!("{}/uploads/", server.base)),
+        "{url}"
+    );
+    assert_eq!(ticket["method"], "PUT");
+    assert_eq!(ticket["expires_in_seconds"], 300);
+    let curl = ticket["curl"].as_str().unwrap();
+    assert!(curl.starts_with("curl -sS -T <file> "), "{curl}");
+    assert!(
+        curl.contains("-H \"Authorization: $WIKI_AUTHORIZATION\""),
+        "{curl}"
+    );
+    assert!(curl.contains("-H 'X-Org-Id: 12345'"), "{curl}");
+    assert!(curl.ends_with(&format!("'{url}'")), "{curl}");
+    // Токена нет ни в адресе, ни в команде, ни в остальном ответе.
+    assert!(!ticket.to_string().contains("upload-token"), "{ticket}");
+
+    let content = file_content(size);
+    let (status, body) =
+        TestServer::send(server.put_file(url, "upload-token", content.clone())).await;
+    assert_eq!(status, 200, "{body}");
+    let result: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(result["results"][0]["download_url"], "/files/big.bin");
+    assert_eq!(
+        result["upload"],
+        json!({"session_id": SESSION, "file_name": "big.bin", "file_size": size, "parts": 2})
+    );
+    let parts: Vec<Vec<u8>> = api
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/upload_part"))
+        .map(|r| r.body)
+        .collect();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].len(), PART);
+    assert_eq!(parts.concat(), content);
+
+    // Адрес одноразовый: повтор отклоняется и в Wiki не идёт (сессия создана один раз).
+    let (status, body) = TestServer::send(server.put_file(url, "upload-token", content)).await;
+    assert_eq!(status, 410, "{body}");
+    assert!(body.contains("already used"), "{body}");
+}
+
+#[tokio::test]
+async fn upload_url_rejects_foreign_requests_and_wrong_sizes() {
+    let api = MockServer::start().await;
+    mount_page(&api).await;
+    // Ни одна отклонённая отправка не доходит до Wiki.
+    mount_session(&api, 10, 0).await;
+    let server = start(
+        &api,
+        Settings {
+            access: AccessLevel::Write,
+            ..Settings::default()
+        },
+    )
+    .await;
+    let ticket = server
+        .create_upload_url(
+            "upload-token",
+            json!({"idx": "42", "file_name": "big.bin", "file_size": 10}),
+        )
+        .await;
+    let url = ticket["upload_url"].as_str().unwrap().to_owned();
+    let send = |request: reqwest::RequestBuilder| TestServer::send(request);
+
+    // Чужой Host — 403 до проверки токена, как у `/mcp`.
+    let (status, body) = send(
+        server
+            .put_file(&url, "upload-token", file_content(10))
+            .header("host", "evil.example"),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("--allowed-host"), "{body}");
+    let (status, _) = send(
+        server
+            .put_file(&url, "upload-token", file_content(10))
+            .header("origin", "http://evil.example"),
+    )
+    .await;
+    assert_eq!(status, 403);
+    // Без токена — 401, без организации — 400.
+    let (status, _) = send(server.http.put(&url).body(file_content(10))).await;
+    assert_eq!(status, 401);
+    let (status, _) = send(
+        server
+            .http
+            .put(&url)
+            .header("authorization", "OAuth upload-token")
+            .body(file_content(10)),
+    )
+    .await;
+    assert_eq!(status, 400);
+    // Другой токен или другая организация — 403: адрес привязан к ним.
+    let (status, body) = send(server.put_file(&url, "other-token", file_content(10))).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        body.contains("another Wiki token or organization"),
+        "{body}"
+    );
+    let (status, _) = send(
+        server
+            .http
+            .put(&url)
+            .header("authorization", "OAuth upload-token")
+            .header("x-org-id", "99999")
+            .body(file_content(10)),
+    )
+    .await;
+    assert_eq!(status, 403);
+    // Неверный секрет — 404, как и неизвестный адрес.
+    let (prefix, secret) = url.rsplit_once('/').unwrap();
+    let flipped = if secret.starts_with('0') { "1" } else { "0" };
+    let wrong = format!("{prefix}/{flipped}{}", &secret[1..]);
+    let (status, _) = send(server.put_file(&wrong, "upload-token", file_content(10))).await;
+    assert_eq!(status, 404);
+    // Размер не тот — 413 (больше) и 400 (меньше).
+    let (status, body) = send(server.put_file(&url, "upload-token", file_content(11))).await;
+    assert_eq!(status, 413, "{body}");
+    let (status, _) = send(server.put_file(&url, "upload-token", file_content(9))).await;
+    assert_eq!(status, 400);
+    // Отклонённые отправки адрес не потратили: он остаётся активным.
+    let urls = server.uploads.as_ref().unwrap();
+    assert_eq!(urls.active(), 1);
+    assert!(
+        api.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() == "/v1/pages/42")
+    );
+}
+
+#[tokio::test]
+async fn upload_url_expires_and_is_limited() {
+    let api = MockServer::start().await;
+    mount_page(&api).await;
+    let server = start(
+        &api,
+        Settings {
+            access: AccessLevel::Write,
+            uploads: UploadUrlLimits {
+                default_ttl: Duration::from_millis(300),
+                max_active: 2,
+                ..UploadUrlLimits::default()
+            },
+            ..Settings::default()
+        },
+    )
+    .await;
+    let args = json!({"idx": 42, "file_name": "a.txt", "file_size": 3});
+    let first = server.create_upload_url("upload-token", args.clone()).await;
+    server.create_upload_url("upload-token", args.clone()).await;
+    // Больше двух активных адресов нельзя.
+    let result = server
+        .call_tool("upload-token", "create_upload_url", args.clone())
+        .await;
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        result_text(&result).contains("too many active upload URLs"),
+        "{result}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let url = first["upload_url"].as_str().unwrap();
+    let (status, body) =
+        TestServer::send(server.put_file(url, "upload-token", b"abc".to_vec())).await;
+    assert_eq!(status, 410, "{body}");
+    assert!(body.contains("expired"), "{body}");
+    // Просроченные адреса место освобождают.
+    server.create_upload_url("upload-token", args).await;
+
+    // Неверные аргументы — ошибка инструмента без адреса.
+    for (args, expected) in [
+        (
+            json!({"idx": 42, "file_name": "a.txt", "file_size": 0}),
+            "file_size",
+        ),
+        (
+            json!({"idx": 42, "file_name": "dir/a.txt", "file_size": 3}),
+            "without directories",
+        ),
+        (
+            json!({"idx": 42, "file_name": "a.txt", "file_size": 3, "expires_in_seconds": 3600}),
+            "expires_in_seconds",
+        ),
+        (json!({"idx": 42, "file_name": "a.txt"}), "file_size"),
+    ] {
+        let result = server
+            .call_tool("upload-token", "create_upload_url", args.clone())
+            .await;
+        assert_eq!(result["isError"], true, "{args}");
+        assert!(result_text(&result).contains(expected), "{args}: {result}");
+    }
+}
+
+#[tokio::test]
+async fn upload_url_needs_an_existing_page_and_write_access() {
+    let api = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/pages/404"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error_code": "NOT_FOUND"})))
+        .mount(&api)
+        .await;
+    let server = start(
+        &api,
+        Settings {
+            access: AccessLevel::Write,
+            ..Settings::default()
+        },
+    )
+    .await;
+    let result = server
+        .call_tool(
+            "upload-token",
+            "create_upload_url",
+            json!({"idx": 404, "file_name": "a.txt", "file_size": 3}),
+        )
+        .await;
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        result_text(&result).contains("no URL was created"),
+        "{result}"
+    );
+    assert_eq!(server.uploads.as_ref().unwrap().active(), 0);
+
+    let read = start(&api, Settings::default()).await;
+    let result = read
+        .call_tool(
+            "upload-token",
+            "create_upload_url",
+            json!({"idx": 42, "file_name": "a.txt", "file_size": 3}),
+        )
+        .await;
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(result_text(&result).contains("--allow-write"), "{result}");
+}
+
+#[tokio::test]
+async fn upload_url_omits_organization_of_a_bound_server() {
+    let api = MockServer::start().await;
+    mount_page(&api).await;
+    let server = start(
+        &api,
+        Settings {
+            access: AccessLevel::Write,
+            org: Some(OrgId::Yandex360("12345".into())),
+            ..Settings::default()
+        },
+    )
+    .await;
+    let (status, body) = server
+        .rpc(
+            "upload-token",
+            &call(
+                "create_upload_url",
+                json!({"idx": 42, "file_name": "a.txt", "file_size": 3}),
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let message: Value = serde_json::from_str(&body).unwrap();
+    let ticket: Value = serde_json::from_str(&result_text(&message["result"])).unwrap();
+    let curl = ticket["curl"].as_str().unwrap();
+    assert!(!curl.contains("X-Org-Id"), "{curl}");
+    assert!(ticket["headers"].get("X-Org-Id").is_none(), "{ticket}");
+}
+
+#[test]
+fn upload_base_url_comes_from_the_host_header() {
+    let base = |headers: &[(&str, &str)]| {
+        let mut request = axum::http::Request::builder();
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let (parts, ()) = request.body(()).unwrap().into_parts();
+        let mut extensions = Extensions::new();
+        extensions.insert(parts);
+        uploads::base_url(&extensions)
+    };
+    assert_eq!(
+        base(&[("host", "127.0.0.1:8767")]).as_deref(),
+        Some("http://127.0.0.1:8767")
+    );
+    assert_eq!(
+        base(&[("host", "LocalHost")]).as_deref(),
+        Some("http://localhost")
+    );
+    assert_eq!(
+        base(&[("host", "[::1]:8767")]).as_deref(),
+        Some("http://[::1]:8767")
+    );
+    assert_eq!(
+        base(&[("host", "mcp.example.com"), ("x-forwarded-proto", "https")]).as_deref(),
+        Some("https://mcp.example.com")
+    );
+    assert_eq!(
+        base(&[("host", "mcp.example.com"), ("x-forwarded-proto", "gopher")]).as_deref(),
+        Some("http://mcp.example.com")
+    );
+    assert_eq!(base(&[("host", "a'b")]), None);
+    assert_eq!(base(&[]), None);
+    assert_eq!(uploads::base_url(&Extensions::new()), None);
 }

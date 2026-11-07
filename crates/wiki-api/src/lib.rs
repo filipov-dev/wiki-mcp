@@ -11,11 +11,16 @@
 //! - [`path`] — проверка и сборка относительных путей API.
 //! - [`org`] — организация Wiki и заголовок, в котором передаётся её ID.
 //! - [`token`] — обёртка токена, которая не попадает в логи и `Debug`.
+//! - [`auth`] — хранение токенов и ключей сервисных аккаунтов в системном хранилище.
+//! - [`iam`] — IAM-токены Yandex Cloud: получение через `yc` или по ключу сервисного
+//!   аккаунта ([`service_account`]), обновление по сроку, только в памяти процесса.
 
 pub mod auth;
 pub mod executor;
+pub mod iam;
 pub mod org;
 pub mod path;
+pub mod service_account;
 pub mod spec;
 pub mod token;
 

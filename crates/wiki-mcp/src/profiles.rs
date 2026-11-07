@@ -1,9 +1,12 @@
 //! Профили: настройки в `~/.config/wiki-mcp/profiles.toml`, токен — в системном хранилище
-//! под именем профиля.
+//! под именем профиля. Профиль с IAM-токенами может вместо сохранённого токена получать их
+//! сам: через `yc iam create-token` или по ключу сервисного аккаунта (ключ — в системном
+//! хранилище отдельной записью); такие токены держатся только в памяти процесса.
 //!
-//! В файле профилей нет токенов и других секретов: только тип токена, организация,
-//! `ClientID` OAuth-приложения пользователя (он не секретный) и настройки доступа по
-//! умолчанию.
+//! В файле профилей нет токенов, ключей и других секретов: только тип токена и источник
+//! IAM-токенов, организация, `ClientID` OAuth-приложения пользователя (он не секретный), путь
+//! к `yc` и имя его профиля, настройки доступа по умолчанию. Путь к файлу ключа сервисного
+//! аккаунта не сохраняется.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,7 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use wiki_api::auth::{AuthError, KeyringStore, TokenStore};
-use wiki_api::{ApiToken, Organization};
+use wiki_api::iam::{IamSource, KeyExchange, YcCommand};
+use wiki_api::{ApiToken, OrgKind, Organization};
 
 /// Переменная окружения, которая переопределяет каталог конфигурации (нужна для тестов).
 pub const CONFIG_DIR_ENV: &str = "WIKI_MCP_CONFIG_DIR";
@@ -64,6 +68,45 @@ impl TokenType {
     }
 }
 
+/// Откуда профиль с IAM-токенами (`token_type = "iam"`) берёт токены.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+pub enum IamSourceKind {
+    /// Токен, сохранённый в системном хранилище (`auth login --token-type iam`). Живёт не
+    /// больше 12 часов, потом его нужно сохранить заново.
+    #[default]
+    #[serde(rename = "token")]
+    #[value(
+        name = "token",
+        help = "an IAM token you paste; it expires within 12 hours"
+    )]
+    Token,
+    /// Новые токены от `yc iam create-token`, только в памяти процесса.
+    #[serde(rename = "yc")]
+    #[value(
+        name = "yc",
+        help = "new tokens from `yc iam create-token` when needed (federated accounts, yc profiles)"
+    )]
+    Yc,
+    /// Новые токены по ключу сервисного аккаунта из системного хранилища, только в памяти.
+    #[serde(rename = "service-account-key")]
+    #[value(
+        name = "service-account-key",
+        help = "new tokens for a service account key stored in the system keychain"
+    )]
+    ServiceAccountKey,
+}
+
+impl IamSourceKind {
+    pub fn is_token(&self) -> bool {
+        *self == Self::Token
+    }
+
+    /// Токены получаются заново по сроку, а не хранятся.
+    pub fn refreshes(self) -> bool {
+        !self.is_token()
+    }
+}
+
 /// Настройки профиля. Токена здесь нет.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -74,8 +117,18 @@ pub struct ProfileSettings {
     /// `ClientID` OAuth-приложения пользователя, через которое получен токен.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    /// Тип токена в системном хранилище: `oauth` (по умолчанию) или `iam`.
+    /// Тип токена: `oauth` (по умолчанию) или `iam`.
     pub token_type: TokenType,
+    /// IAM: откуда брать токены. `token` (сохранённый токен, по умолчанию) не записывается:
+    /// файлы прежних версий читаются и пишутся без изменений.
+    #[serde(skip_serializing_if = "IamSourceKind::is_token")]
+    pub iam_source: IamSourceKind,
+    /// IAM через `yc`: абсолютный путь к `yc`; без него `yc` ищется в `PATH`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yc_path: Option<PathBuf>,
+    /// IAM через `yc`: имя профиля `yc` (`yc --profile`); без него — активный профиль `yc`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yc_profile: Option<String>,
     /// Разрешены операции записи (`serve --allow-write`).
     pub allow_write: bool,
     /// Разрешены удаляющие операции (`serve --allow-destructive`).
@@ -99,6 +152,54 @@ impl ProfileSettings {
         self.allow_write = self.writes_allowed();
         self
     }
+
+    /// Источник IAM-токенов, который получает токены сам (`yc` или ключ), если он задан.
+    /// Сохранённый токен (OAuth или IAM) — `None`.
+    pub fn refreshing_source(&self) -> Option<IamSourceKind> {
+        (self.token_type == TokenType::Iam && self.iam_source.refreshes())
+            .then_some(self.iam_source)
+    }
+
+    /// Команда `yc` для IAM-токена по настройкам профиля.
+    pub fn yc_command(&self) -> anyhow::Result<YcCommand> {
+        Ok(YcCommand::new(
+            self.yc_path.clone(),
+            self.yc_profile.clone(),
+        )?)
+    }
+
+    /// Переводит профиль на сохранённый токен типа `token_type`: настройки источника
+    /// IAM-токенов больше не нужны.
+    pub fn use_stored_token(&mut self, token_type: TokenType) {
+        self.token_type = token_type;
+        self.iam_source = IamSourceKind::Token;
+        self.yc_path = None;
+        self.yc_profile = None;
+    }
+
+    /// Переводит профиль на IAM-токены из источника `source`; настройки `yc` остаются
+    /// только у `yc`.
+    pub fn use_iam_source(&mut self, source: IamSourceKind) {
+        self.token_type = TokenType::Iam;
+        self.iam_source = source;
+        if source != IamSourceKind::Yc {
+            self.yc_path = None;
+            self.yc_profile = None;
+        }
+    }
+}
+
+/// IAM-токены `yc` и ключа сервисного аккаунта выдаются для организации Yandex Cloud
+/// (`X-Cloud-Org-Id`).
+pub fn check_iam_org(profile: &str, org: &Organization) -> anyhow::Result<()> {
+    if org.kind() != OrgKind::Cloud {
+        bail!(
+            "profile `{profile}` gets Yandex Cloud IAM tokens, which work only with a Yandex \
+             Cloud organization, but its organization is {org}; set it with \
+             `wiki-mcp auth login --profile {profile} --cloud-org-id <ID>`"
+        );
+    }
+    Ok(())
 }
 
 /// Содержимое `profiles.toml`.
@@ -217,16 +318,26 @@ pub fn validate_profile_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Профиль, готовый к работе: настройки, организация и токен. Тип токена — в
-/// `settings.token_type`.
+/// Откуда профиль берёт токен.
+#[derive(Debug, Clone)]
+pub enum ProfileAuth {
+    /// Токен из системного хранилища; тип — в `settings.token_type`.
+    Stored(ApiToken),
+    /// IAM-токены из источника (`yc` или ключ сервисного аккаунта): получаются при запросах
+    /// и держатся в памяти.
+    Iam(IamSource),
+}
+
+/// Профиль, готовый к работе: настройки, организация и источник токена.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub settings: ProfileSettings,
     pub org: Organization,
-    pub token: ApiToken,
+    pub auth: ProfileAuth,
 }
 
-/// Загружает профиль: настройки из `profiles.toml` и токен из системного хранилища.
+/// Загружает профиль: настройки из `profiles.toml` и токен из системного хранилища (или
+/// источник IAM-токенов: команду `yc`, ключ сервисного аккаунта из хранилища).
 ///
 /// Отсутствие токена или организации — понятная пользователю ошибка с подсказкой, как их
 /// сохранить.
@@ -244,6 +355,46 @@ pub fn load_profile_with(
 ) -> anyhow::Result<Profile> {
     validate_profile_name(name)?;
     let settings = repo.get(name)?.unwrap_or_default();
+    if settings.token_type != TokenType::Iam && settings.iam_source.refreshes() {
+        bail!(
+            "profile `{name}` in {} has `iam_source` but its `token_type` is not `iam`; fix it \
+             with `wiki-mcp auth login --profile {name}`",
+            repo.path().display()
+        );
+    }
+    if let Some(source) = settings.refreshing_source() {
+        let Some(org) = settings.org.clone() else {
+            bail!(
+                "profile `{name}` has no Wiki organization; set it with \
+                 `wiki-mcp auth login --profile {name} --cloud-org-id <ID>`"
+            );
+        };
+        check_iam_org(name, &org)?;
+        let source = match source {
+            IamSourceKind::Yc => IamSource::Yc(
+                settings
+                    .yc_command()
+                    .with_context(|| format!("profile `{name}` has invalid yc settings"))?,
+            ),
+            _ => {
+                let key = match store.get_service_account_key(name) {
+                    Ok(key) => key,
+                    Err(err @ AuthError::KeyNotFound { .. }) => return Err(err.into()),
+                    Err(err) => {
+                        return Err(anyhow::Error::new(err).context(format!(
+                            "cannot load the service account key of profile `{name}`"
+                        )));
+                    }
+                };
+                IamSource::ServiceAccountKey(KeyExchange::new(key)?)
+            }
+        };
+        return Ok(Profile {
+            settings,
+            org,
+            auth: ProfileAuth::Iam(source),
+        });
+    }
     let token = match store.get(name) {
         Ok(token) => token,
         Err(err @ AuthError::NotFound { .. }) => return Err(err.into()),
@@ -262,7 +413,7 @@ pub fn load_profile_with(
     Ok(Profile {
         settings,
         org,
-        token,
+        auth: ProfileAuth::Stored(token),
     })
 }
 
@@ -278,6 +429,9 @@ mod tests {
             client: Some("codex".into()),
             client_id: Some("0123456789abcdef".into()),
             token_type: TokenType::OAuth,
+            iam_source: IamSourceKind::Token,
+            yc_path: None,
+            yc_profile: None,
             allow_write: true,
             allow_destructive: false,
             toolsets: vec!["pages".into(), "attachments".into()],
@@ -313,8 +467,10 @@ mod tests {
         assert!(text.contains("token_type = \"iam\""), "{text}");
         assert!(text.contains("[profiles.codex.org]"), "{text}");
         assert!(text.contains("type = \"cloud\""), "{text}");
-        // Пустые необязательные поля не записываются.
+        // Пустые необязательные поля и сохранённый IAM-токен по умолчанию не записываются.
         assert_eq!(text.matches("client_id").count(), 1, "{text}");
+        assert!(!text.contains("iam_source"), "{text}");
+        assert!(!text.contains("yc_"), "{text}");
 
         assert!(repo.remove("codex").unwrap());
         assert!(!repo.remove("codex").unwrap());
@@ -408,12 +564,97 @@ mod tests {
         let profile = load_profile_with(&repo, &store, "codex").unwrap();
         assert_eq!(profile.settings, sample());
         assert_eq!(profile.org.header(), ("X-Cloud-Org-Id", "test-org"));
-        assert_eq!(profile.token.expose(), "t");
+        assert!(matches!(&profile.auth, ProfileAuth::Stored(token) if token.expose() == "t"));
 
         // Токен без организации — ошибка с подсказкой.
         store.set("bare", &ApiToken::new("t2")).unwrap();
         let err = load_profile_with(&repo, &store, "bare").unwrap_err();
         assert!(err.to_string().contains("--cloud-org-id"), "{err}");
         assert!(!err.to_string().contains("t2"));
+    }
+
+    /// Файл профилей прежней версии читается и записывается без изменений: рабочие профили
+    /// не нужно подключать заново.
+    #[test]
+    fn existing_profiles_file_is_kept_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = ProfileRepo::in_dir(dir.path());
+        let old = "[profiles.codex]\nclient = \"codex\"\nclient_id = \"0123456789abcdef0123456789abcdef\"\ntoken_type = \"oauth\"\nallow_write = true\nallow_destructive = true\ntoolsets = []\n\n[profiles.codex.org]\ntype = \"cloud\"\nid = \"test-org\"\n";
+        fs::write(repo.path(), old).unwrap();
+        let codex = repo.get("codex").unwrap().unwrap();
+        assert_eq!(codex.iam_source, IamSourceKind::Token);
+        assert_eq!(codex.refreshing_source(), None);
+        repo.upsert("codex", codex).unwrap();
+        assert_eq!(fs::read_to_string(repo.path()).unwrap(), old);
+
+        let store = MemoryStore::new();
+        store.set("codex", &ApiToken::new("t")).unwrap();
+        let profile = load_profile_with(&repo, &store, "codex").unwrap();
+        assert!(matches!(profile.auth, ProfileAuth::Stored(_)));
+    }
+
+    #[test]
+    fn iam_sources_need_cloud_org_and_no_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = ProfileRepo::in_dir(dir.path());
+        let store = MemoryStore::new();
+        let mut yc = ProfileSettings {
+            yc_profile: Some("work".into()),
+            yc_path: Some(dir.path().join("yc")),
+            org: Some(Organization::new(OrgKind::Cloud, "cloud-org").unwrap()),
+            ..ProfileSettings::default()
+        };
+        yc.use_iam_source(IamSourceKind::Yc);
+        repo.upsert("fed", yc.clone()).unwrap();
+        let text = fs::read_to_string(repo.path()).unwrap();
+        assert!(text.contains("token_type = \"iam\""), "{text}");
+        assert!(text.contains("iam_source = \"yc\""), "{text}");
+        assert!(text.contains("yc_profile = \"work\""), "{text}");
+        assert_eq!(repo.get("fed").unwrap(), Some(yc.clone()));
+
+        // Токен в хранилище не нужен и не читается.
+        let profile = load_profile_with(&repo, &store, "fed").unwrap();
+        let ProfileAuth::Iam(IamSource::Yc(command)) = &profile.auth else {
+            panic!("ожидался yc: {:?}", profile.auth);
+        };
+        assert_eq!(command.profile(), Some("work"));
+        assert_eq!(command.program(), dir.path().join("yc"));
+
+        // Организация Yandex 360 с IAM из источника — ошибка.
+        let wrong = ProfileSettings {
+            org: Some(Organization::new(OrgKind::Yandex360, "1").unwrap()),
+            ..yc.clone()
+        };
+        repo.upsert("fed", wrong).unwrap();
+        let err = load_profile_with(&repo, &store, "fed").unwrap_err();
+        assert!(err.to_string().contains("--cloud-org-id"), "{err}");
+
+        let relative = ProfileSettings {
+            yc_path: Some(PathBuf::from("relative/yc")),
+            ..yc.clone()
+        };
+        repo.upsert("fed", relative).unwrap();
+        let err = load_profile_with(&repo, &store, "fed").unwrap_err();
+        assert!(format!("{err:#}").contains("absolute"), "{err:#}");
+
+        // Ключ сервисного аккаунта — из хранилища; без ключа — подсказка.
+        let mut sa = yc.clone();
+        sa.use_iam_source(IamSourceKind::ServiceAccountKey);
+        assert_eq!(sa.yc_profile, None);
+        repo.upsert("robot", sa).unwrap();
+        let err = load_profile_with(&repo, &store, "robot").unwrap_err();
+        assert!(err.to_string().contains("--service-account-key"), "{err}");
+
+        // `iam_source` без `token_type = "iam"` — ошибка.
+        fs::write(repo.path(), "[profiles.x]\niam_source = \"yc\"\n").unwrap();
+        let err = load_profile_with(&repo, &store, "x").unwrap_err();
+        assert!(err.to_string().contains("token_type"), "{err}");
+        fs::write(repo.path(), "[profiles.x]\niam_source = \"password\"\n").unwrap();
+        assert!(repo.get("x").is_err());
+
+        let mut back = yc;
+        back.use_stored_token(TokenType::OAuth);
+        assert_eq!(back.iam_source, IamSourceKind::Token);
+        assert_eq!(back.yc_path, None);
     }
 }

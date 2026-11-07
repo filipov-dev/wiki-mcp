@@ -240,6 +240,44 @@ model = "gpt-5-mini"
     }
 
     #[test]
+    fn codex_home_resolution_windows() {
+        // В Windows `dirs::home_dir()` — `%USERPROFILE%`; `CODEX_HOME` берётся как есть.
+        assert_eq!(
+            codex_home(Some(r"D:\codex".into()), Some(r"C:\Users\u".into())).unwrap(),
+            PathBuf::from(r"D:\codex")
+        );
+        assert_eq!(
+            codex_home(None, Some(r"C:\Users\u".into())).unwrap(),
+            PathBuf::from(r"C:\Users\u").join(".codex")
+        );
+    }
+
+    #[test]
+    fn windows_path_round_trips_through_toml() {
+        let exe = r"C:\Users\u\AppData\Local\Programs\wiki-mcp\wiki-mcp.exe";
+        let spec = ServerSpec {
+            command: exe.into(),
+            ..spec()
+        };
+        let mut doc = DocumentMut::new();
+        apply_entry(&mut doc, &spec).unwrap();
+        // Обратные косые черты в TOML экранируются или пишутся литеральной строкой:
+        // после разбора путь тот же.
+        let parsed: DocumentMut = doc.to_string().parse().unwrap();
+        assert_eq!(parsed["mcp_servers"]["wiki"]["command"].as_str(), Some(exe));
+
+        // Прежняя запись с Windows-путём (любая форма строки TOML) — своя.
+        for existing in [
+            "[mcp_servers.wiki]\ncommand = 'C:\\Tools\\wiki-mcp.exe'\n",
+            "[mcp_servers.wiki]\ncommand = \"C:\\\\Tools\\\\WIKI-MCP.EXE\"\n",
+        ] {
+            let mut doc: DocumentMut = existing.parse().unwrap();
+            let previous = apply_entry(&mut doc, &spec).unwrap().unwrap();
+            assert!(previous.own, "{existing}");
+        }
+    }
+
+    #[test]
     fn adds_entry_to_empty_config() {
         let mut doc = DocumentMut::new();
         assert_eq!(apply_entry(&mut doc, &spec()).unwrap(), None);

@@ -11,8 +11,8 @@ use wiki_api::executor::{
 };
 use wiki_api::{AccessLevel, ApiToken};
 use wiki_mcp_core::{
-    FilePolicy, ServerOptions, TokenSource, UPLOAD_ATTACHMENT_TOOL, WAIT_FOR_OPERATION_TOOL,
-    WikiServer,
+    CREATE_UPLOAD_URL_TOOL, FilePolicy, RequestAuth, ServerOptions, StreamFailure, TokenSource,
+    UPLOAD_ATTACHMENT_TOOL, UploadTarget, WAIT_FOR_OPERATION_TOOL, WikiServer,
 };
 use wiremock::matchers::{any, body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -539,4 +539,179 @@ async fn wait_times_out_with_the_last_status() {
     // Опросы: сразу, через 0,5 с и на исходе тайм-аута.
     let polls = api.received_requests().await.unwrap().len();
     assert!((2..=4).contains(&polls), "{polls}");
+}
+
+// --- Загрузка из потока (одноразовый адрес HTTP-режима) ---
+
+fn stream_target(size: u64) -> UploadTarget {
+    UploadTarget {
+        idx: 42,
+        file_name: "stream.bin".into(),
+        file_size: size,
+    }
+}
+
+fn owner_auth() -> RequestAuth {
+    RequestAuth {
+        credentials: Credentials::oauth(ApiToken::new("stream-token-value")),
+        org: Some(OrgId::Cloud("test-org".into())),
+    }
+}
+
+#[tokio::test]
+async fn stream_upload_attaches_a_file_in_parts() {
+    let size = MAX_FILE_BODY_BYTES + 5;
+    let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let api = MockServer::start().await;
+    mount_create(&api, "stream.bin", size, "s3").await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/upload_sessions/{SESSION}/upload_part")))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "OAuth stream-token-value",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "in_progress"})))
+        .expect(2)
+        .mount(&api)
+        .await;
+    mount_step(&api, "finish", 200, 1).await;
+    mount_step(&api, "abort", 200, 0).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pages/42/attachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            // Токен в ответе Wiki не доходит до отправителя.
+            "results": [{"id": 1, "download_url": "/f", "debug": "stream-token-value"}]
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+    let server = server(&api, AccessLevel::Write, None);
+    let mut reader: &[u8] = &content;
+    let text = server
+        .upload_stream(owner_auth(), &stream_target(size), &mut reader)
+        .await
+        .unwrap();
+    assert!(!text.contains("stream-token-value"), "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["upload"]["parts"], 2);
+    let parts = uploaded_parts(&api).await;
+    let sizes: Vec<u64> = parts.iter().map(|(_, b)| b.len() as u64).collect();
+    assert_eq!(sizes, [MAX_FILE_BODY_BYTES, 5]);
+    let joined: Vec<u8> = parts.into_iter().flat_map(|(_, b)| b).collect();
+    assert_eq!(joined, content);
+}
+
+#[tokio::test]
+async fn stream_of_wrong_length_aborts_the_session() {
+    for (sent, failure, expected) in [
+        (9_usize, StreamFailure::Incomplete, "has 9 bytes"),
+        (11, StreamFailure::TooLarge, "longer than 10 bytes"),
+    ] {
+        let api = MockServer::start().await;
+        mount_create(&api, "stream.bin", 10, "s3").await;
+        let part_expected = u64::from(sent > 10);
+        Mock::given(method("PUT"))
+            .and(path(format!("/v1/upload_sessions/{SESSION}/upload_part")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(part_expected)
+            .mount(&api)
+            .await;
+        mount_step(&api, "finish", 200, 0).await;
+        mount_step(&api, "abort", 200, 1).await;
+        let server = server(&api, AccessLevel::Write, None);
+        let content = vec![7_u8; sent];
+        let mut reader: &[u8] = &content;
+        let err = server
+            .upload_stream(owner_auth(), &stream_target(10), &mut reader)
+            .await
+            .unwrap_err();
+        assert_eq!(err.failure, failure, "{sent}");
+        assert!(err.message.contains(expected), "{sent}: {}", err.message);
+        assert!(err.message.contains("was aborted"), "{}", err.message);
+    }
+}
+
+#[tokio::test]
+async fn stream_upload_reports_wiki_errors() {
+    let api = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/upload_sessions"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error_code": "FORBIDDEN"})))
+        .expect(1)
+        .mount(&api)
+        .await;
+    let server = server(&api, AccessLevel::Write, None);
+    let mut reader: &[u8] = b"0123456789";
+    let err = server
+        .upload_stream(owner_auth(), &stream_target(10), &mut reader)
+        .await
+        .unwrap_err();
+    assert_eq!(err.failure, StreamFailure::Wiki);
+    assert!(
+        err.message.contains("create_upload_session"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("HTTP 403"), "{}", err.message);
+}
+
+#[tokio::test]
+async fn upload_url_is_only_for_remote_servers() {
+    let api = MockServer::start().await;
+    let local = server(&api, AccessLevel::Write, None);
+    assert!(local.registry().get(CREATE_UPLOAD_URL_TOOL).is_none());
+    let result = call(
+        &local,
+        CREATE_UPLOAD_URL_TOOL,
+        json!({"idx": 1, "file_name": "a", "file_size": 1}),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        text(&result).contains("upload_attachment"),
+        "{}",
+        text(&result)
+    );
+
+    let remote = |access| {
+        WikiServer::with_token_source(
+            client(&api),
+            ServerOptions {
+                max_access: access,
+                local_machine: false,
+                ..ServerOptions::default()
+            },
+            FilePolicy::disabled(),
+            TokenSource::Client,
+        )
+        .unwrap()
+    };
+    let write = remote(AccessLevel::Write);
+    assert!(write.registry().get(CREATE_UPLOAD_URL_TOOL).is_some());
+    assert!(write.instructions().contains("call `create_upload_url`"));
+    // Без адресов транспорта инструмент отвечает ошибкой, а не паникой.
+    let result = call(
+        &write,
+        CREATE_UPLOAD_URL_TOOL,
+        json!({"idx": 1, "file_name": "a", "file_size": 1}),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(text(&result).contains("not available"), "{}", text(&result));
+    // Файловый инструмент в HTTP-режиме подсказывает адрес загрузки.
+    let result = call(
+        &write,
+        UPLOAD_ATTACHMENT_TOOL,
+        json!({"idx": 1, "file": "x.bin"}),
+    )
+    .await;
+    assert!(
+        text(&result).contains("create_upload_url"),
+        "{}",
+        text(&result)
+    );
+
+    let read = remote(AccessLevel::Read);
+    assert!(read.registry().get(CREATE_UPLOAD_URL_TOOL).is_none());
+    assert!(!read.instructions().contains("create_upload_url`"));
 }

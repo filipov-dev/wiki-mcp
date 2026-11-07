@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 use reqwest::header::{AUTHORIZATION, HeaderValue, USER_AGENT};
 use serde_json::Value;
+use wiki_api::iam::KeyExchange;
 use wiki_api::{ApiToken, Organization};
 
 use crate::profiles::TokenType;
@@ -48,12 +49,20 @@ pub trait TokenVerifier {
         token_type: TokenType,
         org: &Organization,
     ) -> anyhow::Result<CurrentUser>;
+
+    /// Обмен ключа сервисного аккаунта на IAM-токен для проверки. В тестах IAM API
+    /// подменяется адресом `wiremock`.
+    fn key_exchange(&self, exchange: KeyExchange) -> anyhow::Result<KeyExchange> {
+        Ok(exchange)
+    }
 }
 
 /// Проверка через Wiki API.
 #[derive(Debug, Clone)]
 pub struct ApiVerifier {
     base_url: String,
+    /// Адрес обмена ключа на IAM-токен вместо IAM API Yandex Cloud (тесты).
+    iam_tokens_url: Option<String>,
 }
 
 impl Default for ApiVerifier {
@@ -67,7 +76,15 @@ impl ApiVerifier {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            iam_tokens_url: None,
         }
+    }
+
+    /// Обмен ключа сервисного аккаунта по другому адресу (тесты).
+    #[cfg(test)]
+    pub fn with_iam_tokens_url(mut self, url: impl Into<String>) -> Self {
+        self.iam_tokens_url = Some(url.into());
+        self
     }
 
     fn url(&self) -> String {
@@ -119,6 +136,16 @@ impl TokenVerifier for ApiVerifier {
         match json.as_ref().and_then(current_user) {
             Some(user) => Ok(user),
             None => bail!("unexpected response from Wiki {ME_PATH} (HTTP {status})"),
+        }
+    }
+
+    fn key_exchange(&self, exchange: KeyExchange) -> anyhow::Result<KeyExchange> {
+        match &self.iam_tokens_url {
+            Some(url) => Ok(exchange.with_endpoint(
+                url.parse()
+                    .with_context(|| format!("invalid IAM API address `{url}`"))?,
+            )?),
+            None => Ok(exchange),
         }
     }
 }
@@ -223,6 +250,12 @@ pub mod testing {
             } else {
                 Err(status_error(401, None, token, org))
             }
+        }
+
+        /// Без сети: ключ сервисного аккаунта проверяют только тесты с `ApiVerifier` на
+        /// `wiremock`.
+        fn key_exchange(&self, _exchange: KeyExchange) -> anyhow::Result<KeyExchange> {
+            bail!("FakeVerifier does not exchange service account keys")
         }
     }
 }

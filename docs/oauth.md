@@ -54,7 +54,9 @@ https://oauth.yandex.ru/authorize?response_type=token&client_id=<ClientID>
 
 ## IAM-токен Yandex Cloud
 
-Вместо OAuth-токена профиль может хранить IAM-токен Yandex Cloud (например, из `yc iam create-token`): `wiki-mcp auth login --profile <профиль> --token-type iam`. Сервер отправляет его как `Authorization: Bearer <токен>`, а OAuth-токен — как `Authorization: OAuth <токен>`; тип сохраняется в профиле (`token_type`). IAM-токен живёт не больше 12 часов, поэтому для агентов удобнее OAuth-токен. `connect` работает только с OAuth-токеном вашего приложения.
+Федеративные и сервисные аккаунты Yandex Cloud работают с Wiki по IAM-токену. Сервер отправляет его как `Authorization: Bearer <токен>`, а OAuth-токен — как `Authorization: OAuth <токен>`; тип сохраняется в профиле (`token_type`). IAM-токен живёт не больше 12 часов, поэтому профиль может получать токены сам и обновлять их до истечения срока — через `yc iam create-token` или по ключу сервисного аккаунта, без OAuth-приложения. Как это настроить — в [IAM-токенах](iam.md).
+
+Можно и сохранить готовый IAM-токен вручную: `wiki-mcp auth login --profile <профиль> --token-type iam`. Через 12 часов его придётся сохранить заново.
 
 ## Отзыв токена
 
