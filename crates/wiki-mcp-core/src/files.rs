@@ -8,7 +8,7 @@
 //! - рабочий каталог процесса сервера (stdio-клиенты запускают сервер в каталоге проекта),
 //!   если это не корень файловой системы и не домашний каталог — они слишком широкие;
 //! - системный временный каталог;
-//! - каталоги из `--allow-path`.
+//! - дополнительные каталоги (`allow_path` профиля, суженные флагами `--allow-path`).
 //!
 //! Временный каталог разрешён, чтобы работали подготовленные там файлы и скачивание во
 //! временные файлы; он общий для всех программ пользователя, поэтому это отмечено в `--help`
@@ -223,8 +223,8 @@ impl FilePolicy {
             return Ok(());
         }
         Err(FilePolicyError(format!(
-            "`{original}` is outside the allowed directories ({}); the user can allow more with \
-             `--allow-path <dir>`",
+            "`{original}` is outside the allowed directories ({}); the user can allow more \
+             directories for the server's profile (`allow_path`, `wiki-mcp ui`)",
             self.describe_roots()
         )))
     }

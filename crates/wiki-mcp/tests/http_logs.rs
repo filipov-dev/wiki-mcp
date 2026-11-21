@@ -35,7 +35,11 @@ fn rpc(id: u64, method: &str, params: Value) -> Value {
 
 #[tokio::test]
 async fn token_and_org_never_appear_in_logs() {
+    // Уровень доступа HTTP-сервер берёт из профиля: пустой каталог конфигурации вместо
+    // настоящего `profiles.toml` (без профиля — только чтение, Keychain не читается).
+    let config = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_wiki-mcp"))
+        .env("WIKI_MCP_CONFIG_DIR", config.path())
         .args([
             "serve",
             "--http",

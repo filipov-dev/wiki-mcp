@@ -143,12 +143,11 @@ impl ToolRegistry {
                     tool.name.clone(),
                     format!(
                         "custom tool `{}` is disabled: it {} data in Wiki and the server runs \
-                         with {} access. Ask the user to restart the server with {} if this is \
-                         intended",
+                         with {} access. Ask the user to {} if this is intended",
                         tool.name,
                         access_verb(op.access),
                         access_name(options.max_access),
-                        access_flag(op.access),
+                        access_hint(op.access, options.local_machine),
                     ),
                 );
             } else {
@@ -371,10 +370,10 @@ impl ToolRegistry {
         if !self.max_access.allows(access) {
             return Some(format!(
                 "tool `{name}` is disabled: it {} data in Wiki and the server runs with {} \
-                 access. Ask the user to restart the server with {} if this change is intended",
+                 access. Ask the user to {} if this change is intended",
                 access_verb(access),
                 access_name(self.max_access),
-                access_flag(access),
+                access_hint(access, self.local_files),
             ));
         }
         if !self.toolset_enabled(toolset) {
@@ -536,12 +535,42 @@ pub fn access_name(access: AccessLevel) -> &'static str {
     }
 }
 
-/// Флаг сервера, который включает уровень доступа `access`.
+/// Флаг сервера, который включает уровень доступа `access` в HTTP-режиме: там уровень
+/// задаёт оператор флагами `serve --http`.
 pub fn access_flag(access: AccessLevel) -> &'static str {
     match access {
         AccessLevel::Read => "no extra flag",
         AccessLevel::Write => "--allow-write",
         AccessLevel::Destructive => "--allow-destructive",
+    }
+}
+
+/// Что пользователь делает, чтобы включить уровень `access`; фраза продолжает «Ask the user
+/// to …». У локального сервера (`local_machine`) права — настройка профиля: флаги запуска их
+/// только сужают, а на macOS повышение ещё и одобряется Touch ID. В HTTP-режиме уровень
+/// задают флаги `serve --http`.
+pub fn access_hint(access: AccessLevel, local_machine: bool) -> String {
+    match access {
+        AccessLevel::Read => "keep the read-only access".to_owned(),
+        level if local_machine => format!(
+            "allow `{}` access for the server's profile with `wiki-mcp ui` and restart the \
+             server",
+            access_name(level)
+        ),
+        level => format!("restart the server with {}", access_flag(level)),
+    }
+}
+
+/// Короткое название недостающего уровня для `enable_with` в `api_search`: у локального
+/// сервера — права профиля, в HTTP-режиме — флаг.
+pub fn access_requirement(access: AccessLevel, local_machine: bool) -> String {
+    if local_machine {
+        format!(
+            "`{}` access for the server's profile (`wiki-mcp ui`)",
+            access_name(access)
+        )
+    } else {
+        access_flag(access).to_owned()
     }
 }
 
@@ -741,19 +770,39 @@ mod tests {
         assert!(err.contains("unknown toolset `Таблицы`"), "{err}");
     }
 
+    /// stdio-сервер отправляет к правам профиля, HTTP-сервер — к флагам оператора.
     #[test]
-    fn unavailable_reasons_name_the_flag() {
+    fn access_hints_depend_on_the_transport() {
+        let local = access_hint(AccessLevel::Write, true);
+        assert!(local.contains("`wiki-mcp ui`"), "{local}");
+        assert!(!local.contains("--allow-write"), "{local}");
+        let http = access_hint(AccessLevel::Destructive, false);
+        assert_eq!(http, "restart the server with --allow-destructive");
+        assert_eq!(
+            access_requirement(AccessLevel::Write, false),
+            "--allow-write"
+        );
+        assert!(access_requirement(AccessLevel::Write, true).contains("profile"));
+        assert_eq!(
+            access_hint(AccessLevel::Read, false),
+            "keep the read-only access"
+        );
+    }
+
+    #[test]
+    fn unavailable_reasons_name_the_access() {
         let read = ToolRegistry::new(&options(AccessLevel::Read, None)).unwrap();
         let reason = read.unavailable_reason("create_page").unwrap();
-        assert!(reason.contains("--allow-write"), "{reason}");
+        assert!(reason.contains("`write` access"), "{reason}");
+        assert!(reason.contains("wiki-mcp ui"), "{reason}");
         let reason = read.unavailable_reason("delete_page").unwrap();
-        assert!(reason.contains("--allow-destructive"), "{reason}");
+        assert!(reason.contains("`destructive` access"), "{reason}");
         assert!(read.unavailable_reason("get_page").is_none());
         assert!(read.unavailable_reason("no_such_tool").is_none());
 
         let write = ToolRegistry::new(&options(AccessLevel::Write, None)).unwrap();
         let reason = write.unavailable_reason("delete_page").unwrap();
-        assert!(reason.contains("--allow-destructive") && reason.contains("write access"));
+        assert!(reason.contains("`destructive` access") && reason.contains("write access"));
 
         let destructive = ToolRegistry::new(&options(AccessLevel::Destructive, None)).unwrap();
         let reason = destructive
@@ -768,7 +817,7 @@ mod tests {
         let read = ToolRegistry::new(&options(AccessLevel::Read, None)).unwrap();
         assert!(read.get(UPLOAD_ATTACHMENT_TOOL).is_none());
         let reason = read.unavailable_reason(UPLOAD_ATTACHMENT_TOOL).unwrap();
-        assert!(reason.contains("--allow-write"), "{reason}");
+        assert!(reason.contains("`write` access"), "{reason}");
         let wait = read.get(WAIT_FOR_OPERATION_TOOL).unwrap();
         assert_eq!(wait.access, AccessLevel::Read);
         assert!(matches!(wait.kind, ToolKind::Composite(_)));

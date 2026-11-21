@@ -457,7 +457,11 @@ async fn custom_tools_are_registered_from_start() {
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true));
-    assert!(text(&result).contains("--allow-write"), "{}", text(&result));
+    assert!(
+        text(&result).contains("`write` access"),
+        "{}",
+        text(&result)
+    );
 
     for tool in ["enable_toolset", "disable_toolset"] {
         let result = server

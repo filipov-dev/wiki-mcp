@@ -369,7 +369,11 @@ async fn upload_needs_write_access_and_a_local_server() {
     )
     .await;
     assert_eq!(result.is_error, Some(true));
-    assert!(text(&result).contains("--allow-write"), "{}", text(&result));
+    assert!(
+        text(&result).contains("`write` access"),
+        "{}",
+        text(&result)
+    );
     assert!(read.registry().get(WAIT_FOR_OPERATION_TOOL).is_some());
 
     let remote = WikiServer::with_token_source(

@@ -88,8 +88,8 @@ pub fn validate_server_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Команда запуска сервера, которую получает MCP-клиент. Токена в ней нет: `serve` берёт его
-/// из системного хранилища по профилю.
+/// Команда запуска сервера, которую получает MCP-клиент. Токена и флагов доступа в ней нет:
+/// `serve` берёт токен из системного хранилища, а права — из профиля.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSpec {
     /// Имя сервера в конфигурации клиента.
@@ -121,13 +121,7 @@ impl ServerSpec {
             "--profile".to_owned(),
             profile.to_owned(),
         ];
-        // Флаги — по действующему уровню: удаление всегда передаётся вместе с записью.
-        if settings.writes_allowed() {
-            args.push("--allow-write".to_owned());
-        }
-        if settings.allow_destructive {
-            args.push("--allow-destructive".to_owned());
-        }
+        // Флагов доступа нет: права — настройка профиля, флаги `serve` их только сужают.
         if !settings.toolsets.is_empty() {
             args.push("--toolsets".to_owned());
             args.push(settings.toolsets.join(","));
@@ -205,36 +199,15 @@ mod tests {
             ..ProfileSettings::default()
         };
         let spec = ServerSpec::new("wiki", &exe, "ci", &settings).unwrap();
+        // Права профиля в регистрацию не попадают.
         assert_eq!(
             spec.args,
             [
                 "serve",
                 "--profile",
                 "ci",
-                "--allow-write",
-                "--allow-destructive",
                 "--toolsets",
                 "pages,attachments"
-            ]
-        );
-    }
-
-    #[test]
-    fn server_spec_destructive_implies_write() {
-        let exe = PathBuf::from(TEST_EXE);
-        let settings = ProfileSettings {
-            allow_destructive: true,
-            ..ProfileSettings::default()
-        };
-        let spec = ServerSpec::new("wiki", &exe, "ci", &settings).unwrap();
-        assert_eq!(
-            spec.args,
-            [
-                "serve",
-                "--profile",
-                "ci",
-                "--allow-write",
-                "--allow-destructive"
             ]
         );
     }

@@ -129,10 +129,7 @@ fn render(tools: &[CustomTool], default: &Path) -> String {
             details.join("; ")
         ));
     }
-    out.push_str(
-        "\nTools above the server's access level (--allow-write, --allow-destructive) are not \
-         registered.\n",
-    );
+    out.push_str("\nTools above the access level of the server's profile are not registered.\n");
     out
 }
 

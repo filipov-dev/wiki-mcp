@@ -28,7 +28,7 @@ use wiki_api::spec::{AccessLevel, BodyKind, HttpMethod, OperationDef, ResponseKi
 use crate::error::ToolError;
 use crate::files::{FilePolicy, LOCAL_FILES_DISABLED};
 use crate::jq::add_jq_argument;
-use crate::registry::{access_flag, access_name};
+use crate::registry::{access_hint, access_name};
 use crate::request::{SAVE_TO_ARG, save_to_path};
 use crate::routes::{AccessDecision, default_access, required_access};
 
@@ -114,8 +114,12 @@ pub fn api_request_tool(max_access: AccessLevel, local_files: bool) -> Tool {
     let allowed = match max_access {
         AccessLevel::Read => {
             "This server is read-only, so only requests that read data are allowed (GET and \
-             read-only operations such as POST /v1/search); others are refused with the flag \
-             the user would need."
+             read-only operations such as POST /v1/search); others are refused with the access \
+             level the user would need."
+        }
+        AccessLevel::Write if local_files => {
+            "This server allows reading and changing data; deleting and changing access rights \
+             need `destructive` access for the server's profile."
         }
         AccessLevel::Write => {
             "This server allows reading and changing data; deleting and changing access rights \
@@ -174,7 +178,7 @@ pub fn prepare(
     // Уровень доступа проверяется раньше всего остального: в отказе не раскрываются
     // подробности о локальных файлах.
     let decision = required_access(method, &path);
-    check_access(method, &path, &decision, max_access)?;
+    check_access(method, &path, &decision, max_access, !files.is_disabled())?;
     check_bodies(method, &path, &decision, present(SAVE_TO_ARG), files)?;
 
     if method == HttpMethod::Get && present("body") {
@@ -262,6 +266,7 @@ fn check_access(
     path: &str,
     decision: &AccessDecision,
     max_access: AccessLevel,
+    local_machine: bool,
 ) -> Result<(), ToolError> {
     if max_access.allows(decision.required) {
         return Ok(());
@@ -280,11 +285,11 @@ fn check_access(
     };
     Err(ToolError::new(format!(
         "{} {path} needs {} access ({reason}), but the server runs with {} access. Ask the user \
-         to restart the server with {} if this change is intended",
+         to {} if this change is intended",
         method.as_str(),
         access_name(decision.required),
         access_name(max_access),
-        access_flag(decision.required),
+        access_hint(decision.required, local_machine),
     )))
 }
 
@@ -584,12 +589,12 @@ mod tests {
         assert!(message.contains("needs write access"), "{message}");
         assert!(message.contains("`create_page`"), "{message}");
         assert!(message.contains("read-only access"), "{message}");
-        assert!(message.contains("--allow-write"), "{message}");
+        assert!(message.contains("`write` access"), "{message}");
 
         let message = err(json!({"method": "DELETE", "path": "/v1/pages/42"}), read);
         assert!(message.contains("needs destructive access"), "{message}");
         assert!(message.contains("`delete_page`"), "{message}");
-        assert!(message.contains("--allow-destructive"), "{message}");
+        assert!(message.contains("`destructive` access"), "{message}");
 
         // Изменение прав доступа — уровень удаления даже с правом записи.
         let message = err(
@@ -602,7 +607,7 @@ mod tests {
         // Неизвестный путь — по методу.
         let message = err(json!({"method": "PATCH", "path": "/v1/unknown/1"}), read);
         assert!(message.contains("match no known operation"), "{message}");
-        assert!(message.contains("--allow-write"), "{message}");
+        assert!(message.contains("`write` access"), "{message}");
         let message = err(
             json!({"method": "DELETE", "path": "/v1/unknown/1"}),
             AccessLevel::Write,
@@ -656,7 +661,7 @@ mod tests {
             json!({"method": "PUT", "path": "/v1/upload_sessions/s1/upload_part"}),
             AccessLevel::Read,
         );
-        assert!(message.contains("--allow-write"), "{message}");
+        assert!(message.contains("`write` access"), "{message}");
     }
 
     #[test]

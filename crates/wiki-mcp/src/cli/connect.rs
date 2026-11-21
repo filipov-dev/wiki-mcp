@@ -3,8 +3,10 @@
 //! Сценарий: OAuth-приложение пользователя (`ClientID` в профиле; при первом запуске —
 //! инструкция и страница создания приложения) → организация → токен по ссылке авторизации
 //! приложения, скрытым вводом → проверка `GET /v1/users/me` → токен в системное хранилище,
-//! настройки в `profiles.toml` → запись сервера в конфигурацию клиента после подтверждения.
-//! Токен не проходит через агента и не попадает ни в аргументы, ни в конфигурацию клиента.
+//! настройки в `profiles.toml` (права — только если заданы флаги; на macOS повышение прав
+//! одобряется Touch ID или паролем) → запись сервера в конфигурацию клиента после
+//! подтверждения, без флагов доступа. Токен не проходит через агента и не попадает ни в
+//! аргументы, ни в конфигурацию клиента.
 //!
 //! Без флагов IAM `connect` работает с OAuth-токеном приложения пользователя: тип токена
 //! профиля становится `oauth`, сохранённый IAM-токен не оставляется.
@@ -19,6 +21,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
 use clap::Args;
+use mcp_kit::approval::{self, ApprovalStore, Presence};
+use mcp_kit::{AccessLevel, ProfileAccess};
 use wiki_api::Organization;
 use wiki_api::auth::{AuthError, KeyringStore, TokenStore};
 use wiki_api::iam::{IamSource, KeyExchange};
@@ -26,7 +30,7 @@ use wiki_mcp_core::toolsets;
 
 use crate::browser::{BrowserDecision, BrowserEnv, decide};
 use crate::clients::claude::{self, CommandRunner, SystemRunner};
-use crate::clients::{ClientKind, DEFAULT_SERVER_NAME, Scope, ServerSpec, codex};
+use crate::clients::{ClientKind, DEFAULT_SERVER_NAME, EXE_STEM, Scope, ServerSpec, codex};
 use crate::login::{
     apply_yc_flags, check_iam, check_new_token, org_from_flags, resolve_iam_org, resolve_org,
     save_service_account_key, save_token, service_account_key,
@@ -47,7 +51,13 @@ can reuse the application saved in another profile and go straight to the token.
 
 The token is obtained from the authorization link of your application, read with hidden \
 input, checked with GET /v1/users/me and stored only in the system keychain under the profile \
-name. The client config gets only the command `wiki-mcp serve --profile <profile> ...`.
+name. The client config gets only the command `wiki-mcp serve --profile <profile> ...` \
+without access flags; never the token.
+
+The access is a setting of the profile: --allow-write and --allow-destructive change it \
+(without them the profile keeps its access, read-only for a new profile), and `wiki-mcp ui` \
+changes it later. On macOS, raising the access asks for Touch ID or the macOS password; access \
+that is not approved does not take effect.
 
 Links open in the default browser; over SSH, without a graphical session or with \
 --no-browser they are only printed.
@@ -74,10 +84,11 @@ pub struct ConnectArgs {
     /// Where to register the server in the client. Codex supports only `user`.
     #[arg(long, value_enum, default_value_t = Scope::User)]
     pub scope: Scope,
-    /// Allow tools that create or modify data in Wiki.
+    /// Set the access of the profile to write: tools that create or modify data in Wiki.
     #[arg(long)]
     pub allow_write: bool,
-    /// Allow tools that delete data in Wiki (implies --allow-write).
+    /// Set the access of the profile to destructive: also tools that delete data or change
+    /// access rights in Wiki (implies --allow-write).
     #[arg(long)]
     pub allow_destructive: bool,
     /// Comma-separated toolsets to enable, or `all` (passed to `serve --toolsets`).
@@ -160,7 +171,10 @@ pub async fn run(args: ConnectArgs) -> anyhow::Result<()> {
         ClientKind::ClaudeCode => PathBuf::new(),
     };
     let verifier = (!args.skip_check).then(ApiVerifier::default);
+    let approvals = approval::platform_store(EXE_STEM);
+    let presence = approval::platform_presence();
     let mut env = ConnectEnv {
+        approval: approvals.as_deref().zip(presence.as_deref()),
         store: &KeyringStore,
         repo: &ProfileRepo::open_default()?,
         verifier: verifier.as_ref(),
@@ -175,6 +189,8 @@ pub async fn run(args: ConnectArgs) -> anyhow::Result<()> {
 
 /// Зависимости `connect`; в тестах подменяются хранилищем в памяти и временными каталогами.
 pub struct ConnectEnv<'a, V> {
+    /// Одобрение прав (macOS); `None` — платформа без одобрения.
+    pub approval: Option<(&'a dyn ApprovalStore, &'a dyn Presence)>,
     pub store: &'a dyn TokenStore,
     pub repo: &'a ProfileRepo,
     /// Проверка токена; `None` — `--skip-check`.
@@ -259,19 +275,18 @@ pub async fn connect<V: TokenVerifier>(
         .map(normalize_client_id)
         .transpose()?;
     let mut settings = env.repo.get(&profile)?.unwrap_or_default();
-    let access = ProfileSettings {
-        allow_write: args.allow_write,
-        allow_destructive: args.allow_destructive,
-        ..Default::default()
-    }
-    .normalized();
+    // Флаги доступа меняют права профиля, а в регистрацию не попадают.
+    let requested_level = AccessLevel::requested_by_flags(args.allow_write, args.allow_destructive);
+    let writes = requested_level.map_or(settings.writes_allowed(), |level| {
+        level.allows(AccessLevel::Write)
+    });
     let spec = ServerSpec::new(
         &args.name,
         &env.exe,
         &profile,
         &ProfileSettings {
             toolsets: toolsets.clone(),
-            ..access.clone()
+            ..Default::default()
         },
     )?;
     let iam_source = args.iam_source(&settings)?;
@@ -325,7 +340,7 @@ pub async fn connect<V: TokenVerifier>(
         let flags = OAuthFlags {
             org: org_flags,
             client_id: client_id_flag,
-            allow_write: access.allow_write,
+            allow_write: writes,
         };
         let org = oauth_token(env, args, &profile, &mut settings, flags).await?;
         settings.use_stored_token(TokenType::OAuth);
@@ -333,8 +348,9 @@ pub async fn connect<V: TokenVerifier>(
     }
 
     settings.client = Some(client.name().to_owned());
-    settings.allow_write = access.allow_write;
-    settings.allow_destructive = access.allow_destructive;
+    if let Some(level) = requested_level {
+        change_access(env.ui, env.approval, &profile, &mut settings, level);
+    }
     settings.toolsets = toolsets;
     env.repo.upsert(&profile, settings)?;
     env.ui.say(&format!(
@@ -364,6 +380,35 @@ pub async fn connect<V: TokenVerifier>(
         ));
     }
     Ok(())
+}
+
+/// Меняет уровень доступа профиля (каталоги профиля остаются). На macOS повышение сначала
+/// одобряется владельцем; отказ не останавливает `connect`: профиль сохраняет прежние права.
+fn change_access(
+    ui: &mut dyn Ui,
+    approval: Option<(&dyn ApprovalStore, &dyn Presence)>,
+    profile: &str,
+    settings: &mut ProfileSettings,
+    level: AccessLevel,
+) {
+    let before = settings.access();
+    let access = ProfileAccess::new(level, before.allow_path.clone());
+    let what = format!("{EXE_STEM} profile \"{profile}\"");
+    match approval::save_access_with(approval, profile, &what, &access, |access| {
+        settings.set_access(access);
+        Ok(())
+    }) {
+        Ok(saved) if saved.prompted => ui.say(&format!(
+            "Access `{}` approved on this Mac.",
+            saved.access.summary()
+        )),
+        Ok(_) => {}
+        Err(err) => ui.say(&format!(
+            "The access was not changed: {err}. Profile `{profile}` keeps `{}` access; change \
+             it later with `wiki-mcp ui`.",
+            before.summary()
+        )),
+    }
 }
 
 /// Флаги OAuth, проверенные до первого вопроса пользователю.
@@ -498,6 +543,7 @@ async fn oauth_token<V: TokenVerifier>(
 mod tests {
     use std::fs;
 
+    use mcp_kit::approval::testing::{FakePresence, MemoryStore as MemoryApprovals};
     use wiki_api::ApiToken;
     use wiki_api::auth::MemoryStore;
 
@@ -521,6 +567,8 @@ mod tests {
         ui: ScriptedUi,
         codex_home: PathBuf,
         browser: BrowserDecision,
+        /// Одобрение прав, как на macOS; `None` — как на Linux и Windows.
+        approval: Option<(MemoryApprovals, FakePresence)>,
     }
 
     impl Fixture {
@@ -537,6 +585,7 @@ mod tests {
                 ui: ScriptedUi::default(),
                 codex_home: dir.path().join("codex"),
                 browser: BrowserDecision::Skip(SkipReason::Flag),
+                approval: None,
                 _dir: dir,
             }
         }
@@ -568,7 +617,12 @@ mod tests {
         }
 
         async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<()> {
+            let approval = self
+                .approval
+                .as_ref()
+                .map(|(store, presence)| (store as &dyn ApprovalStore, presence as &dyn Presence));
             let mut env = ConnectEnv {
+                approval,
                 store: &self.store,
                 repo: &self.repo,
                 verifier: (!self.skip_check).then_some(&self.verifier),
@@ -642,7 +696,6 @@ mod tests {
                 "serve",
                 "--profile",
                 "codex",
-                "--allow-write",
                 "--toolsets",
                 "pages"
             ])),
@@ -727,14 +780,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_flag_combinations() {
-        let cases: [(bool, bool, &[&str]); 4] = [
-            (false, false, &[]),
-            (true, false, &["--allow-write"]),
-            (false, true, &["--allow-write", "--allow-destructive"]),
-            (true, true, &["--allow-write", "--allow-destructive"]),
-        ];
-        for (write, destructive, flags) in cases {
+    async fn access_flags_change_the_profile_not_the_registration() {
+        let cases = [(false, false), (true, false), (false, true), (true, true)];
+        for (write, destructive) in cases {
             let mut fx = Fixture::new().with_profile("codex");
             fx.tokens(&["good-token"]);
             let mut args = args(ClientKind::Codex);
@@ -747,11 +795,59 @@ mod tests {
             assert_eq!(settings.allow_write, write || destructive);
             assert_eq!(settings.allow_destructive, destructive);
 
-            let mut expected = vec!["serve", "--profile", "codex"];
-            expected.extend_from_slice(flags);
             let config = fx.codex_config().unwrap();
-            assert!(config.contains(&toml_args(&expected)), "{config}");
+            assert!(
+                config.contains(&toml_args(&["serve", "--profile", "codex"])),
+                "{config}"
+            );
         }
+
+        // Без флагов права профиля не меняются.
+        let mut fx = Fixture::new().with_profile("codex");
+        let mut settings = fx.repo.get("codex").unwrap().unwrap();
+        settings.allow_write = true;
+        fx.repo.upsert("codex", settings).unwrap();
+        fx.tokens(&["good-token"]);
+        let mut args = args(ClientKind::Codex);
+        args.yes = true;
+        fx.connect(&args).await.unwrap();
+        assert!(fx.repo.get("codex").unwrap().unwrap().allow_write);
+    }
+
+    #[tokio::test]
+    async fn raising_access_needs_approval_on_macos() {
+        let mut fx = Fixture::new().with_profile("codex");
+        fx.approval = Some((MemoryApprovals::default(), FakePresence::new(false)));
+        fx.tokens(&["good-token"]);
+        let mut args = args(ClientKind::Codex);
+        args.allow_destructive = true;
+        args.yes = true;
+        fx.connect(&args).await.unwrap();
+        // Отказ: права прежние, но токен, профиль и регистрация сохранены.
+        let settings = fx.repo.get("codex").unwrap().unwrap();
+        assert!(!settings.allow_write && !settings.allow_destructive);
+        let text = fx.ui.text();
+        assert!(text.contains("The access was not changed"), "{text}");
+        assert!(text.contains("`wiki-mcp ui`"), "{text}");
+        assert!(fx.codex_config().is_some());
+        assert_eq!(fx.store.get("codex").unwrap().expose(), "good-token");
+
+        fx.approval = Some((MemoryApprovals::default(), FakePresence::new(true)));
+        fx.ui = ScriptedUi::default();
+        fx.connect(&args).await.unwrap();
+        let settings = fx.repo.get("codex").unwrap().unwrap();
+        assert!(settings.allow_destructive);
+        let (approvals, presence) = fx.approval.as_ref().unwrap();
+        assert_eq!(presence.asked.get(), 1);
+        assert_eq!(
+            approvals.load("codex").unwrap().unwrap().level,
+            AccessLevel::Destructive
+        );
+        assert!(
+            fx.ui.text().contains("approved on this Mac"),
+            "{}",
+            fx.ui.text()
+        );
     }
 
     #[tokio::test]
@@ -969,8 +1065,6 @@ mod tests {
                 "serve",
                 "--profile",
                 "codex",
-                "--allow-write",
-                "--allow-destructive",
                 "--toolsets",
                 "all"
             ])),

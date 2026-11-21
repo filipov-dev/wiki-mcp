@@ -201,7 +201,7 @@ fn error_message(body: &Value) -> Option<String> {
 }
 
 /// Логин и организация из ответа `GET /v1/users/me` (схема `MeSchema`).
-fn current_user(body: &Value) -> Option<CurrentUser> {
+pub(crate) fn current_user(body: &Value) -> Option<CurrentUser> {
     let text = |value: &Value, key: &str| {
         value
             .get(key)

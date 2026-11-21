@@ -7,17 +7,23 @@
 //! (`wiki_api::iam::IamTokens`), токены держатся только в памяти. Переменные окружения токен
 //! не задают.
 //!
+//! Права (уровень доступа и каталоги `allow_path`) — из настроек профиля; флаги командной
+//! строки их только сужают, на macOS права сверх чтения ещё и должны быть одобрены
+//! владельцем ([`mcp_kit::approval`]). Наборы: флаги, иначе профиль, иначе по умолчанию.
+//!
 //! HTTP ([`http_server`]): профилей и хранилища нет, токен (и организация, если её не задаёт
-//! флаг сервера) приходит в заголовках каждого запроса агента и нигде не сохраняется.
-//! Уровень доступа и наборы — только флагами командной строки, локальные файлы выключены
+//! флаг сервера) приходит в заголовках каждого запроса агента и нигде не сохраняется. Уровень
+//! доступа и наборы задаёт оператор флагами `serve --http`: права профиля и одобрение на macOS
+//! относятся только к stdio (`serve`, `call`, `connect`). Токен в HTTP-режиме виден агенту,
+//! поэтому уровень сервера — страховка от ошибок, а не граница. Локальные файлы выключены
 //! (`ServerOptions::local_machine = false`).
 //!
 //! `serve --status` печатает действующие настройки (профиль, тип токена, организация, уровень
-//! доступа, наборы, разрешённые каталоги) и выходит, не запуская сервер и не обращаясь к API.
-//! С `--http` он недоступен: у HTTP-сервера нет профиля, а все его настройки — флаги запуска.
+//! доступа и его одобрение, наборы, разрешённые каталоги) и выходит, не запуская сервер и не
+//! обращаясь к API. С `--http` он недоступен: остальные настройки HTTP-сервера — флаги запуска.
 //!
 //! Локальные файлы (загрузка части файла, скачивание вложений в `save_to`) разрешены только
-//! в рабочем каталоге, временном каталоге и каталогах `--allow-path` (`FilePolicy`).
+//! в рабочем каталоге, временном каталоге и каталогах `allow_path` профиля (`FilePolicy`).
 //!
 //! Пользовательские инструменты ([`crate::cli::tools`]) читаются при запуске: в stdio — файл
 //! пользователя и `--tools-file`, в HTTP — только `--tools-file`. Фильтры `jq` выполняются в
@@ -33,6 +39,8 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use clap::Args;
+use mcp_kit::approval::{self, ApprovalState, ApprovalStore, Resolved};
+use mcp_kit::{AccessRequest, ProfileAccess};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use tracing_subscriber::EnvFilter;
@@ -46,6 +54,7 @@ use wiki_mcp_core::{
 };
 
 use crate::cli::{jq_worker, tools};
+use crate::clients::EXE_STEM;
 use crate::profiles::{
     DEFAULT_PROFILE, IamSourceKind, ProfileAuth, ProfileRepo, ProfileSettings, TokenType,
     load_profile_with, validate_profile_name,
@@ -61,13 +70,19 @@ const DEFAULT_LOG_LEVEL: &str = "warn";
 
 #[derive(Debug, Clone, Args)]
 #[command(after_help = "\
-Access level and toolsets: flags given on the command line win; without them the settings \
-saved for the profile are used. Without any, the server is read-only and exposes the default \
-toolsets: pages, attachments, comments, grids. The `access` (personal access rights to pages) \
-and `extra` (operations missing from the Wiki API reference) toolsets are enabled only \
-explicitly. --allow-destructive implies --allow-write; changing access rights needs \
---allow-destructive. Use --toolsets all for every toolset; the error for an unknown name lists \
-the available ones.
+Access: the access level and the extra directories (allow_path) are settings of the profile; \
+change them with `wiki-mcp ui`. --allow-write, --allow-destructive and --allow-path can only \
+narrow them: asking for more than the profile allows is an error. On macOS, access above \
+read-only takes effect only after the owner approved it on this Mac (`wiki-mcp ui` asks for \
+Touch ID or the macOS password); without the approval the server runs read-only and says so in \
+stderr. --allow-destructive implies --allow-write; changing access rights to pages needs the \
+destructive level.
+
+Toolsets: --toolsets wins; without it the toolsets saved for the profile are used, otherwise \
+the default ones: pages, attachments, comments, grids. The `access` (personal access rights to \
+pages) and `extra` (operations missing from the Wiki API reference) toolsets are enabled only \
+explicitly. Use --toolsets all for every toolset; the error for an unknown name lists the \
+available ones.
 
 Dynamic toolsets: with --dynamic-toolsets the server starts with only `api_search`, \
 `api_request`, `list_toolsets`, `enable_toolset` and `disable_toolset`, plus the toolsets given \
@@ -100,8 +115,8 @@ is never read from environment variables or command-line arguments.
 
 Local files: file arguments of tools (`file` of upload_attachment and upload_file_part, `save_to` for attachment \
 downloads) must be inside the server's working directory (unless it is the filesystem root or \
-the home directory), the system temp directory, or a directory given with --allow-path. The \
-temp directory is allowed for scratch files and downloads; other programs share it, so keep \
+the home directory), the system temp directory, or an extra directory of the profile \
+(allow_path; --allow-path keeps only the given ones). The temp directory is allowed for scratch files and downloads; other programs share it, so keep \
 nothing private there. Paths are checked after resolving `..` and symbolic links: a link that \
 leads outside these directories is rejected, and existing files are never overwritten.
 
@@ -114,18 +129,23 @@ profiles and no stored tokens: every request must carry the agent's Wiki token i
 `Authorization: OAuth <token>` (OAuth token) or `Authorization: Bearer <token>` (Yandex Cloud \
 IAM token), and the organization in `X-Org-Id` or `X-Cloud-Org-Id` unless the server is bound \
 to one with --org-id or --cloud-org-id (then a different organization in a request is \
-rejected). Access level and toolsets come from the command line only. Local files are \
-disabled: there are no upload and download tools. The Host header must be a loopback name, the \
+rejected). Access level and toolsets come from the command line only: --allow-write and \
+--allow-destructive set the access of the HTTP server (profiles and their access are for stdio \
+only). Local files are disabled: there are no upload and download tools. The Host header must \
+be a loopback name, the \
 --listen address or an --allowed-host; browser requests are rejected unless their Origin is \
 allowed with --allowed-origin. Outside loopback, put the server behind a TLS reverse proxy.")]
 pub struct ServeArgs {
-    /// Profile with the token and organization [default: default]. Not available with --http.
+    /// Profile with the token, organization and access [default: default]. Not available
+    /// with --http.
     #[arg(long, conflicts_with = "http")]
     pub profile: Option<String>,
-    /// Register tools that create or modify data.
+    /// Limit the access to write (the profile must allow it). With --http: allow tools that
+    /// create or modify data.
     #[arg(long)]
     pub allow_write: bool,
-    /// Register tools that delete data or change access rights (implies --allow-write).
+    /// Limit the access to destructive: also deleting data and changing access rights (the
+    /// profile must allow it; implies --allow-write). With --http: allow those tools.
     #[arg(long)]
     pub allow_destructive: bool,
     /// Comma-separated toolsets to enable, or `all`. With --dynamic-toolsets: the toolsets
@@ -140,8 +160,8 @@ pub struct ServeArgs {
     /// Repeatable. In HTTP mode only these files are read.
     #[arg(long, value_name = "PATH")]
     pub tools_file: Vec<PathBuf>,
-    /// Extra directory that tools may read files from or save files to. Repeatable.
-    /// Not available with --http.
+    /// Limit the extra directories of the profile to this one (it must be inside a directory
+    /// of the profile). Repeatable. Not available with --http.
     #[arg(long, value_name = "DIR", conflicts_with = "http")]
     pub allow_path: Vec<PathBuf>,
     /// Timeout of one API request, in seconds.
@@ -190,8 +210,41 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    fn profile(&self) -> &str {
+    /// `serve` без флагов для профиля `profile` (stdio): так сервер собирают `call` и `ui`.
+    pub fn for_profile(profile: Option<String>) -> Self {
+        Self {
+            profile,
+            allow_write: false,
+            allow_destructive: false,
+            toolsets: Vec::new(),
+            dynamic_toolsets: false,
+            tools_file: Vec::new(),
+            allow_path: Vec::new(),
+            timeout: DEFAULT_TIMEOUT_SECS,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            log_level: None,
+            status: false,
+            http: false,
+            listen: None,
+            allowed_host: Vec::new(),
+            allowed_origin: Vec::new(),
+            org_id: None,
+            cloud_org_id: None,
+            max_request_bytes: None,
+        }
+    }
+
+    pub fn profile(&self) -> &str {
         self.profile.as_deref().unwrap_or(DEFAULT_PROFILE)
+    }
+
+    /// Что просят флаги доступа.
+    fn access_request(&self) -> AccessRequest {
+        AccessRequest::from_flags(
+            self.allow_write,
+            self.allow_destructive,
+            self.allow_path.clone(),
+        )
     }
 
     /// Проверка аргументов до обращения к хранилищу.
@@ -225,10 +278,20 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         return http_server::run(server, listen, http).await;
     }
     let repo = ProfileRepo::open_default()?;
+    let approvals = approval::platform_store(EXE_STEM);
     if args.status {
-        return status(&KeyringStore, &repo, &args, &mut TerminalUi);
+        return status(
+            &KeyringStore,
+            &repo,
+            approvals.as_deref(),
+            &args,
+            &mut TerminalUi,
+        );
     }
-    let setup = Setup::load(&args, &KeyringStore, &repo)?;
+    let setup = Setup::load(&args, &KeyringStore, &repo, approvals.as_deref())?;
+    if let Some(warning) = &setup.warning {
+        eprintln!("wiki-mcp: {warning}");
+    }
     tracing::info!(
         profile = %setup.profile,
         access = ?setup.options.max_access,
@@ -248,7 +311,7 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
 }
 
 /// Логи — только в stderr: stdout занят протоколом MCP.
-fn init_logging(level: Option<&str>) -> anyhow::Result<()> {
+pub(crate) fn init_logging(level: Option<&str>) -> anyhow::Result<()> {
     let filter = match level {
         Some(level) => EnvFilter::try_new(level)
             .map_err(|err| anyhow!("invalid --log-level `{level}`: {err}"))?,
@@ -271,23 +334,29 @@ pub struct Setup {
     pub options: ServerOptions,
     pub files: FilePolicy,
     pub config: ClientConfig,
+    /// Предупреждение для stderr: права профиля урезаны до одобренных (macOS).
+    pub warning: Option<String>,
 }
 
 impl Setup {
-    /// Читает профиль (токен — из `store`) и собирает настройки сервера.
+    /// Читает профиль (токен — из `store`, одобренные права — из `approvals`) и собирает
+    /// настройки сервера.
     pub fn load(
         args: &ServeArgs,
         store: &dyn TokenStore,
         repo: &ProfileRepo,
+        approvals: Option<&dyn ApprovalStore>,
     ) -> anyhow::Result<Self> {
         args.validate()?;
         let profile_name = args.profile();
         let profile = load_profile_with(repo, store, profile_name)
             .with_context(|| format!("cannot load profile `{profile_name}`"))?;
-        let mut options = effective_options(args, &profile.settings)?;
+        let resolved = resolve_access(args, &profile.settings, approvals)?;
+        let mut options = effective_options(args, &profile.settings, &resolved.access)?;
         options.custom_tools = tools::load(Some(&tools::user_tools_file(repo)), &args.tools_file)?;
         options.jq = jq_worker::current_runner();
-        let files = FilePolicy::with_defaults(&args.allow_path).map_err(|err| anyhow!(err))?;
+        let files =
+            FilePolicy::with_defaults(&resolved.access.allow_path).map_err(|err| anyhow!(err))?;
         // Схема `Authorization` — по типу токена профиля; IAM-токены из источника
         // получаются при запросах и обновляются по сроку.
         let (credentials, iam) = match profile.auth {
@@ -307,6 +376,7 @@ impl Setup {
             options,
             files,
             config,
+            warning: resolved.verified.warning(EXE_STEM, profile_name),
         })
     }
 
@@ -317,7 +387,7 @@ impl Setup {
     }
 }
 
-/// Всё, что нужно для HTTP-режима: без профиля и хранилища, только флаги.
+/// Всё, что нужно для HTTP-режима: без хранилища; из профиля — только уровень доступа.
 pub struct HttpSetup {
     pub options: ServerOptions,
     /// Настройки общего клиента API — без токена и организации: на каждый вызов ядро делает
@@ -328,6 +398,8 @@ pub struct HttpSetup {
 }
 
 impl HttpSetup {
+    /// Настройки HTTP-сервера — только из флагов запуска: уровень доступа задаёт оператор
+    /// (`--allow-write`, `--allow-destructive`), профили не читаются.
     pub fn load(args: &ServeArgs) -> anyhow::Result<Self> {
         args.validate()?;
         let toolsets = normalize_toolsets(&args.toolsets).map_err(|err| anyhow!(err))?;
@@ -418,22 +490,54 @@ impl Source {
     }
 }
 
-/// Уровень доступа: флаги командной строки, если заданы, иначе настройки профиля.
-/// В обоих случаях `allow_destructive` подразумевает запись.
-fn effective_access(args: &ServeArgs, settings: &ProfileSettings) -> (AccessLevel, Source) {
-    if args.allow_write || args.allow_destructive {
-        (
-            access_from_flags(args.allow_write, args.allow_destructive),
-            Source::Flags,
+/// Права сервера: права профиля, урезанные до одобренных (macOS), затем суженные флагами.
+/// Флаг сверх прав профиля — ошибка с подсказкой, где меняются права.
+fn resolve_access(
+    args: &ServeArgs,
+    settings: &ProfileSettings,
+    approvals: Option<&dyn ApprovalStore>,
+) -> anyhow::Result<Resolved> {
+    resolve_with_hint(
+        args.profile(),
+        approvals,
+        &settings.access(),
+        &args.access_request(),
+    )
+}
+
+fn resolve_with_hint(
+    profile: &str,
+    approvals: Option<&dyn ApprovalStore>,
+    configured: &ProfileAccess,
+    request: &AccessRequest,
+) -> anyhow::Result<Resolved> {
+    approval::resolve_with(approvals, profile, configured, request).map_err(|err| {
+        anyhow!(
+            "{err}. The access of profile `{profile}` is changed with `wiki-mcp ui`; \
+             registrations made by older versions with access flags are updated by \
+             `wiki-mcp connect`"
         )
+    })
+}
+
+/// Уровень доступа ядра по уровню из mcp-kit.
+pub fn api_level(level: mcp_kit::AccessLevel) -> AccessLevel {
+    match level {
+        mcp_kit::AccessLevel::Read => AccessLevel::Read,
+        mcp_kit::AccessLevel::Write => AccessLevel::Write,
+        mcp_kit::AccessLevel::Destructive => AccessLevel::Destructive,
+    }
+}
+
+/// Откуда взяты права: из флагов (сужены), из профиля или по умолчанию (только чтение).
+fn access_source(args: &ServeArgs, settings: &ProfileSettings) -> Source {
+    let request = args.access_request();
+    if request.level.is_some() || !request.allow_path.is_empty() {
+        Source::Flags
+    } else if settings.access().is_read_only() {
+        Source::Default
     } else {
-        let level = access_from_flags(settings.allow_write, settings.allow_destructive);
-        let source = if level == AccessLevel::Read {
-            Source::Default
-        } else {
-            Source::Profile
-        };
-        (level, source)
+        Source::Profile
     }
 }
 
@@ -458,11 +562,11 @@ fn effective_toolsets(
 fn effective_options(
     args: &ServeArgs,
     settings: &ProfileSettings,
+    access: &ProfileAccess,
 ) -> anyhow::Result<ServerOptions> {
-    let (max_access, _) = effective_access(args, settings);
     let (toolsets, _) = effective_toolsets(args, settings)?;
     Ok(ServerOptions {
-        max_access,
+        max_access: api_level(access.level),
         toolsets,
         dynamic_toolsets: args.dynamic_toolsets,
         local_machine: true,
@@ -477,6 +581,7 @@ fn effective_options(
 pub fn status(
     store: &dyn TokenStore,
     repo: &ProfileRepo,
+    approvals: Option<&dyn ApprovalStore>,
     args: &ServeArgs,
     ui: &mut dyn Ui,
 ) -> anyhow::Result<()> {
@@ -510,7 +615,9 @@ pub fn status(
         },
     };
     let has_token = token_line.is_ok();
-    let (access, access_source) = effective_access(args, &settings);
+    let resolved = resolve_access(args, &settings, approvals)?;
+    let access = api_level(resolved.access.level);
+    let access_source = access_source(args, &settings);
     let (toolsets, toolsets_source) = effective_toolsets(args, &settings)?;
     let tools_file = tools::user_tools_file(repo);
     let options = ServerOptions {
@@ -523,7 +630,8 @@ pub fn status(
         ..ServerOptions::default()
     };
     let registry = ToolRegistry::new(&options).map_err(|err| anyhow!(err))?;
-    let files = FilePolicy::with_defaults(&args.allow_path).map_err(|err| anyhow!(err))?;
+    let files =
+        FilePolicy::with_defaults(&resolved.access.allow_path).map_err(|err| anyhow!(err))?;
 
     ui.say(&format!("Profile:   {profile}"));
     ui.say(&format!(
@@ -548,6 +656,13 @@ pub fn status(
         access_description(access),
         access_source.label()
     ));
+    ui.say(&format!(
+        "Approval:  {}",
+        approval_text(&resolved.verified.state)
+    ));
+    if let Some(warning) = resolved.verified.warning(EXE_STEM, profile) {
+        ui.say(&format!("Warning:   {warning}"));
+    }
     let enabled = registry.enabled_toolsets();
     let toolsets_text = if enabled.len() == wiki_api::spec::toolsets().len() {
         ALL_TOOLSETS.to_owned()
@@ -607,6 +722,22 @@ pub fn status(
         ui.say("The server cannot start until the profile has a token and an organization.");
     }
     Ok(())
+}
+
+/// Состояние одобрения для `serve --status`.
+pub fn approval_text(state: &ApprovalState) -> String {
+    match state {
+        ApprovalState::NotRequired => {
+            "not used on this platform (the token's rights in Wiki limit the access)".to_owned()
+        }
+        ApprovalState::ReadOnly => "not needed (read-only)".to_owned(),
+        ApprovalState::Approved => "approved on this Mac".to_owned(),
+        ApprovalState::Missing => "not approved on this Mac".to_owned(),
+        ApprovalState::Exceeds { approved } => {
+            format!("only `{}` is approved on this Mac", approved.summary())
+        }
+        ApprovalState::Unavailable(reason) => format!("cannot read the keychain: {reason}"),
+    }
 }
 
 fn access_description(access: AccessLevel) -> &'static str {
@@ -712,6 +843,24 @@ mod tests {
         assert!(err.to_string().contains("unknown toolset"), "{err}");
     }
 
+    /// HTTP-режим профилей не читает: уровень задают только флаги оператора
+    /// (`HttpSetup::load` не получает ни профилей, ни хранилища одобрений).
+    #[test]
+    fn http_access_comes_from_the_flags_only() {
+        let setup = HttpSetup::load(&parse(&["--http"])).unwrap();
+        assert_eq!(setup.options.max_access, AccessLevel::Read);
+        let setup = HttpSetup::load(&parse(&["--http", "--allow-write"])).unwrap();
+        assert_eq!(setup.options.max_access, AccessLevel::Write);
+        // Подсказки агенту в HTTP-режиме называют флаги, а не профиль.
+        let (server, _) = setup.server().unwrap();
+        let instructions = server.instructions();
+        assert!(
+            instructions.contains("--allow-destructive"),
+            "{instructions}"
+        );
+        assert!(!instructions.contains("wiki-mcp ui"), "{instructions}");
+    }
+
     #[test]
     fn http_rejects_local_only_flags() {
         for extra in [
@@ -759,7 +908,13 @@ mod tests {
     }
 
     fn options(args: &[&str], saved: &ProfileSettings) -> ServerOptions {
-        effective_options(&parse(args), saved).unwrap()
+        try_options(args, saved).unwrap()
+    }
+
+    fn try_options(args: &[&str], saved: &ProfileSettings) -> anyhow::Result<ServerOptions> {
+        let args = parse(args);
+        let resolved = resolve_access(&args, saved, None)?;
+        effective_options(&args, saved, &resolved.access)
     }
 
     /// Профиль во временном каталоге и токен в памяти: системный keychain не трогаем.
@@ -781,7 +936,7 @@ mod tests {
 
     fn status_text(args: &[&str], repo: &ProfileRepo, store: &MemoryStore) -> String {
         let mut ui = ScriptedUi::default();
-        status(store, repo, &parse(args), &mut ui).unwrap();
+        status(store, repo, None, &parse(args), &mut ui).unwrap();
         ui.text()
     }
 
@@ -803,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_flags_win_over_profile() {
+    fn flags_narrow_access_and_win_for_toolsets() {
         let saved = settings(true, true, &["pages"]);
         let opts = options(&[], &saved);
         assert_eq!(opts.max_access, AccessLevel::Destructive);
@@ -817,14 +972,112 @@ mod tests {
         );
 
         // --allow-destructive без --allow-write — удаление и запись.
-        let opts = options(&["--allow-destructive"], &settings(false, false, &[]));
+        let opts = options(&["--allow-destructive"], &saved);
         assert_eq!(opts.max_access, AccessLevel::Destructive);
+
+        // Флаги не расширяют права профиля.
+        let read_only = settings(false, false, &[]);
+        let err = try_options(&["--allow-write"], &read_only).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("profile allows only `read`"), "{text}");
+        assert!(
+            text.contains("access of profile `default` is changed with `wiki-mcp ui`"),
+            "{text}"
+        );
+        let write = settings(true, false, &[]);
+        assert!(try_options(&["--allow-destructive"], &write).is_err());
 
         let all = options(&["--toolsets", "all"], &saved);
         assert_eq!(
             all.toolsets.unwrap().len(),
             wiki_api::spec::toolsets().len()
         );
+    }
+
+    #[test]
+    fn allow_path_comes_from_profile_and_flags_narrow_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let inner = root.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let saved = ProfileSettings {
+            allow_path: vec![root.clone()],
+            ..settings(false, false, &[])
+        };
+        let args = parse(&[]);
+        let resolved = resolve_access(&args, &saved, None).unwrap();
+        assert_eq!(resolved.access.allow_path, vec![root.clone()]);
+        let args = parse(&["--allow-path", inner.to_str().unwrap()]);
+        let resolved = resolve_access(&args, &saved, None).unwrap();
+        assert_eq!(resolved.access.allow_path, vec![inner]);
+        let other = tempfile::tempdir().unwrap();
+        let args = parse(&["--allow-path", other.path().to_str().unwrap()]);
+        let err = resolve_access(&args, &saved, None).unwrap_err();
+        assert!(
+            err.to_string().contains("not inside a directory allowed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unapproved_access_runs_read_only_with_a_warning() {
+        use mcp_kit::approval::testing::MemoryStore as MemoryApprovals;
+
+        let (_dir, repo, store) = fixture(Some(settings(true, true, &[])), true);
+        let approvals = MemoryApprovals::default();
+        let setup = Setup::load(
+            &parse(&["--profile", "ci"]),
+            &store,
+            &repo,
+            Some(&approvals),
+        )
+        .unwrap();
+        assert_eq!(setup.options.max_access, AccessLevel::Read);
+        let warning = setup.warning.unwrap();
+        assert!(warning.contains("not approved on this Mac"), "{warning}");
+        assert!(warning.contains("wiki-mcp ui"), "{warning}");
+        // Старая регистрация с флагами в пределах профиля запускается, но на чтение.
+        let setup = Setup::load(
+            &parse(&["--profile", "ci", "--allow-destructive"]),
+            &store,
+            &repo,
+            Some(&approvals),
+        )
+        .unwrap();
+        assert_eq!(setup.options.max_access, AccessLevel::Read);
+
+        approvals
+            .save(
+                "ci",
+                &ProfileAccess::new(mcp_kit::AccessLevel::Write, vec![]),
+            )
+            .unwrap();
+        let setup = Setup::load(
+            &parse(&["--profile", "ci"]),
+            &store,
+            &repo,
+            Some(&approvals),
+        )
+        .unwrap();
+        assert_eq!(setup.options.max_access, AccessLevel::Write);
+        assert!(setup.warning.unwrap().contains("only `write` is approved"));
+
+        let mut ui = ScriptedUi::default();
+        status(
+            &store,
+            &repo,
+            Some(&approvals),
+            &parse(&["--profile", "ci"]),
+            &mut ui,
+        )
+        .unwrap();
+        let text = ui.text();
+        assert!(text.contains("Access:    write"), "{text}");
+        assert!(
+            text.contains("Approval:  only `write` is approved on this Mac"),
+            "{text}"
+        );
+        assert!(text.contains("Warning:   profile `ci`"), "{text}");
     }
 
     #[test]
@@ -846,19 +1099,15 @@ mod tests {
 
     #[test]
     fn invalid_toolsets_are_reported() {
-        let err = effective_options(
-            &parse(&["--toolsets", "repos"]),
-            &ProfileSettings::default(),
-        )
-        .unwrap_err();
+        let err = try_options(&["--toolsets", "repos"], &ProfileSettings::default()).unwrap_err();
         assert!(err.to_string().contains("unknown toolset `repos`"), "{err}");
-        let err = effective_options(&parse(&[]), &settings(false, false, &["repos"])).unwrap_err();
+        let err = try_options(&[], &settings(false, false, &["repos"])).unwrap_err();
         assert!(err.to_string().contains("profile settings"), "{err}");
     }
 
     #[test]
     fn status_shows_destructive_without_write_flag() {
-        let (_dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
+        let (_dir, repo, store) = fixture(Some(settings(false, true, &[])), true);
         let text = status_text(&["--profile", "ci", "--allow-destructive"], &repo, &store);
         assert!(text.contains("Profile:   ci"), "{text}");
         assert!(text.contains("Token:     stored"), "{text}");
@@ -881,6 +1130,11 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Disabled:  access,extra"), "{text}");
+        assert!(
+            text.contains("Approval:  not used on this platform"),
+            "{text}"
+        );
+        assert!(!text.contains("Warning:"), "{text}");
         let tmp = std::env::temp_dir().canonicalize().unwrap();
         assert!(text.contains("Files:     "), "{text}");
         assert!(text.contains(&tmp.display().to_string()), "{text}");
@@ -947,7 +1201,7 @@ mod tests {
     #[test]
     fn setup_requires_token_and_org() {
         let (_dir, repo, store) = fixture(Some(settings(false, false, &[])), false);
-        let err = Setup::load(&parse(&["--profile", "ci"]), &store, &repo)
+        let err = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None)
             .err()
             .unwrap();
         assert!(
@@ -956,26 +1210,29 @@ mod tests {
         );
 
         let (_dir, repo, store) = fixture(None, true);
-        let err = Setup::load(&parse(&["--profile", "ci"]), &store, &repo)
+        let err = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None)
             .err()
             .unwrap();
         assert!(format!("{err:#}").contains("--org-id"), "{err:#}");
         assert!(!format!("{err:#}").contains("serve-test-token"));
 
-        assert!(Setup::load(&parse(&["--timeout", "0"]), &store, &repo).is_err());
-        // Несуществующий каталог --allow-path — ошибка запуска, а не тихий пропуск.
+        assert!(Setup::load(&parse(&["--timeout", "0"]), &store, &repo, None).is_err());
+        // Несуществующий каталог профиля — ошибка запуска, а не тихий пропуск.
         let (_dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
         let missing = repo.path().with_file_name("missing-dir");
-        let missing = missing.display().to_string();
-        let err = Setup::load(
-            &parse(&["--profile", "ci", "--allow-path", &missing]),
-            &store,
-            &repo,
+        repo.upsert(
+            "ci",
+            ProfileSettings {
+                allow_path: vec![missing],
+                ..settings(false, false, &[])
+            },
         )
-        .err()
         .unwrap();
+        let err = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None)
+            .err()
+            .unwrap();
         assert!(format!("{err:#}").contains("not accessible"), "{err:#}");
-        assert!(Setup::load(&parse(&["--profile", "a b"]), &store, &repo).is_err());
+        assert!(Setup::load(&parse(&["--profile", "a b"]), &store, &repo, None).is_err());
     }
 
     #[test]
@@ -985,7 +1242,7 @@ mod tests {
             ..settings(false, false, &[])
         };
         let (_dir, repo, store) = fixture(Some(iam), true);
-        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         let credentials = setup.config.credentials.as_ref().unwrap();
         assert_eq!(
             credentials,
@@ -993,7 +1250,7 @@ mod tests {
         );
 
         let (_dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
-        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         assert_eq!(
             setup.config.credentials.as_ref().unwrap(),
             &Credentials::oauth(ApiToken::new("serve-test-token"))
@@ -1063,12 +1320,13 @@ args = { idx = 42 }
 
         std::fs::write(dir.path().join("tools.toml"), TOOLS_TOML).unwrap();
         let text = status_text(&["--profile", "ci"], &repo, &store);
-        // Инструмент записи определён, но без --allow-write не зарегистрирован.
+        // Инструмент записи определён, но без права записи в профиле не зарегистрирован.
         assert!(
             text.contains("Custom:    2 defined, 1 registered"),
             "{text}"
         );
-        let text = status_text(&["--profile", "ci", "--allow-write"], &repo, &store);
+        repo.upsert("ci", settings(true, false, &[])).unwrap();
+        let text = status_text(&["--profile", "ci"], &repo, &store);
         assert!(
             text.contains("Custom:    2 defined, 2 registered"),
             "{text}"
@@ -1098,9 +1356,8 @@ args = { idx = 42 }
 
         let bad = dir.path().join("bad.toml");
         std::fs::write(&bad, "[[tools]]\nname = \"x\"\n").unwrap();
-        let err = HttpSetup::load(&parse(&["--http", "--tools-file", bad.to_str().unwrap()]))
-            .err()
-            .unwrap();
+        let args = parse(&["--http", "--tools-file", bad.to_str().unwrap()]);
+        let err = HttpSetup::load(&args).err().unwrap();
         assert!(err.to_string().contains("bad.toml"), "{err}");
     }
 
@@ -1121,7 +1378,7 @@ args = { idx = 42 }
 
         let (dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
         std::fs::write(dir.path().join("tools.toml"), TOOLS_TOML).unwrap();
-        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         setup.config.base_url = api.uri().parse().unwrap();
         // В тестах текущий бинарник — тестовый, подкоманды `jq-worker` у него нет.
         setup.options.jq = wiki_mcp_core::JqRunner::in_process();
@@ -1164,7 +1421,7 @@ args = { idx = 42 }
             .await;
 
         let (_dir, repo, store) = fixture(Some(settings(false, false, &[])), true);
-        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         setup.config.base_url = api.uri().parse().unwrap();
         let server = setup.server().unwrap();
 
@@ -1225,7 +1482,7 @@ args = { idx = 42 }
             "{text}"
         );
         assert!(!text.contains("cannot start"), "{text}");
-        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         assert!(setup.config.credentials.is_none());
         assert!(setup.config.iam.is_some());
         assert_eq!(setup.config.org, Some(OrgId::Cloud("cloud-org".into())));
@@ -1239,7 +1496,7 @@ args = { idx = 42 }
         let text = status_text(&["--profile", "ci"], &repo, &store);
         assert!(text.contains("--service-account-key <FILE>"), "{text}");
         assert!(text.contains("cannot start"), "{text}");
-        assert!(Setup::load(&parse(&["--profile", "ci"]), &store, &repo).is_err());
+        assert!(Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).is_err());
 
         let key = ServiceAccountKey::from_json(key_file().0.as_bytes()).unwrap();
         store.set_service_account_key("ci", &key).unwrap();
@@ -1249,7 +1506,7 @@ args = { idx = 42 }
             "{text}"
         );
         assert!(!text.contains("cannot start"), "{text}");
-        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         assert!(setup.config.iam.is_some());
     }
 
@@ -1278,7 +1535,7 @@ args = { idx = 42 }
         };
         settings.use_iam_source(IamSourceKind::Yc);
         let (_dir, repo, store) = fixture(Some(settings), false);
-        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo).unwrap();
+        let mut setup = Setup::load(&parse(&["--profile", "ci"]), &store, &repo, None).unwrap();
         setup.config.base_url = api.uri().parse().unwrap();
         let server = setup.server().unwrap();
 

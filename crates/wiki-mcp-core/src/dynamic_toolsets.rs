@@ -28,7 +28,7 @@ use wiki_api::spec::{AccessLevel, operations};
 
 use crate::composite::Composite;
 use crate::error::ToolError;
-use crate::registry::{ToolKind, ToolRegistry, access_flag, uses_local_files};
+use crate::registry::{ToolKind, ToolRegistry, access_hint, uses_local_files};
 use crate::toolsets::{available_toolsets, normalize_toolsets};
 
 pub const LIST_TOOLSETS_TOOL: &str = "list_toolsets";
@@ -201,13 +201,13 @@ pub fn list(args: &JsonObject, registry: &ToolRegistry) -> Result<String, ToolEr
          `api_request` and custom tools are always available."
     );
     if hidden_total > 0 {
-        let flag = match registry.max_access() {
-            AccessLevel::Read => access_flag(AccessLevel::Write),
-            _ => access_flag(AccessLevel::Destructive),
+        let hint = match registry.max_access() {
+            AccessLevel::Read => access_hint(AccessLevel::Write, registry.local_files()),
+            _ => access_hint(AccessLevel::Destructive, registry.local_files()),
         };
         note.push_str(&format!(
             " `above_access_level` counts tools this server does not allow at its access \
-             level; only the user can allow them by restarting the server (e.g. with {flag})."
+             level; only the user can allow them: ask the user to {hint}."
         ));
     }
     out.insert("note".into(), json!(note));
@@ -403,7 +403,7 @@ mod tests {
         let access = toolsets.iter().find(|t| t["toolset"] == "access").unwrap();
         assert_eq!(access["enabled"], false);
         assert_eq!(access["default"], false);
-        assert!(out["note"].as_str().unwrap().contains("--allow-write"));
+        assert!(out["note"].as_str().unwrap().contains("`write` access"));
 
         // Составные инструменты считаются в своих наборах.
         let attachments = toolsets
@@ -471,7 +471,7 @@ mod tests {
         assert!(next.get("list_attachments").is_some());
         assert!(next.get(UPLOAD_ATTACHMENT_TOOL).is_none());
         let reason = next.unavailable_reason(UPLOAD_ATTACHMENT_TOOL).unwrap();
-        assert!(reason.contains("--allow-write"), "{reason}");
+        assert!(reason.contains("`write` access"), "{reason}");
 
         let write = registry(AccessLevel::Write, None);
         let reason = write.unavailable_reason(UPLOAD_ATTACHMENT_TOOL).unwrap();
@@ -510,7 +510,7 @@ mod tests {
         assert!(reason.contains("api_request"), "{reason}");
         assert!(reason.contains("GET /v1/pages"), "{reason}");
         let reason = reg.unavailable_reason("create_page").unwrap();
-        assert!(reason.contains("--allow-write"), "{reason}");
+        assert!(reason.contains("`write` access"), "{reason}");
     }
 
     #[test]

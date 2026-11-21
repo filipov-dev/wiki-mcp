@@ -4,7 +4,6 @@
 //! сервисного аккаунта на токен — в `tests/service_account.rs`.
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -50,12 +49,29 @@ else
 fi
 "#;
 
+/// Пишет исполняемый скрипт через отдельный процесс `sh`: если тест держит
+/// открытый на запись дескриптор, параллельный тест может унаследовать его
+/// при fork, и запуск скрипта падает с «Text file busy» (ETXTBSY).
+fn write_script(path: &std::path::Path, content: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(content.as_bytes()).unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
 impl FakeYc {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("yc");
-        std::fs::write(&script, SCRIPT).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&script, SCRIPT);
         Self { dir }
     }
 
@@ -402,12 +418,10 @@ async fn yc_timeout_stops_the_process() {
 async fn bad_output_is_reported_without_it() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("yc");
-    std::fs::write(
+    write_script(
         &script,
         "#!/bin/sh\necho 'secret-looking output with spaces'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let command = YcCommand::new(Some(script), None).unwrap();
     let err = command.run().await.unwrap_err();
     assert!(matches!(err, IamError::BadOutput { .. }), "{err:?}");

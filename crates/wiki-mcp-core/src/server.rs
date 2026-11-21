@@ -766,12 +766,26 @@ pub fn server_instructions(
     files: &FilePolicy,
 ) -> String {
     let access = match options.max_access {
+        AccessLevel::Read if options.local_machine => {
+            "This server is read-only: only tools that read data are available. Tools that \
+             create or change data (pages, comments, grids, attachments) are enabled when the \
+             user allows `write` access for the server's profile, and tools that delete data or \
+             change access rights with `destructive` access (the user does it with `wiki-mcp \
+             ui`, then restarts the server). If a task needs them, ask the user instead of \
+             looking for workarounds."
+        }
         AccessLevel::Read => {
             "This server is read-only: only tools that read data are available. Tools that \
              create or change data (pages, comments, grids, attachments) are enabled when the \
              user starts the server with --allow-write, and tools that delete data or change \
              access rights with --allow-destructive. If a task needs them, ask the user \
              instead of looking for workarounds."
+        }
+        AccessLevel::Write if options.local_machine => {
+            "This server can read, create and change data, but not delete it or change access \
+             rights: those tools need `destructive` access for the server's profile \
+             (`wiki-mcp ui`). Confirm changes with the user when they were not explicitly \
+             requested."
         }
         AccessLevel::Write => {
             "This server can read, create and change data, but not delete it or change access \
@@ -820,7 +834,8 @@ pub fn server_instructions(
              `save_to` of the `download_attachment*` tools and of `api_request`) take a path \
              (absolute, or relative to the server's working directory) inside the allowed \
              directories: {roots}. Other paths and symbolic links leading outside are rejected; \
-             the user can allow more with --allow-path. Downloads never overwrite existing \
+             the user can allow more directories for the server's profile (`allow_path`, \
+             `wiki-mcp ui`). Downloads never overwrite existing \
              files. To attach a local file to a page, call `{upload}` with the page `idx` and \
              the file path: it creates the upload session, uploads the parts, finishes the \
              session and attaches the file in one call, and aborts the session if a step \
@@ -999,7 +1014,7 @@ mod tests {
     fn instructions_depend_on_access() {
         let read = instructions(&ServerOptions::default());
         assert!(read.contains("(read-only access)"), "{read}");
-        assert!(read.contains("--allow-write") && read.contains("--allow-destructive"));
+        assert!(read.contains("`write` access") && read.contains("`destructive` access"));
         assert!(
             read.contains("Enabled toolsets: pages, attachments, comments, grids;"),
             "{read}"

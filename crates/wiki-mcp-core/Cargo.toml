@@ -26,7 +26,7 @@ subtle = "2.6.1"
 # Процесс фильтра `jq`, таймауты и уведомления о смене списка инструментов.
 tokio = { version = "1.54.1", features = ["fs", "process", "io-util", "time", "sync", "macros"] }
 tracing = "0.1.44"
-wiki-api = { version = "0.2.0", path = "../wiki-api" }
+wiki-api = { version = "0.3.0", path = "../wiki-api" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

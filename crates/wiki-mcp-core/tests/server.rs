@@ -200,10 +200,14 @@ async fn read_only_server_end_to_end() {
     )
     .await;
     assert_eq!(result.is_error, Some(true));
-    assert!(text(&result).contains("--allow-write"), "{}", text(&result));
+    assert!(
+        text(&result).contains("`write` access"),
+        "{}",
+        text(&result)
+    );
     let result = call(&client, "delete_page", json!({"idx": 1})).await;
     assert!(
-        text(&result).contains("--allow-destructive"),
+        text(&result).contains("`destructive` access"),
         "{}",
         text(&result)
     );
@@ -495,7 +499,7 @@ async fn api_request_respects_access() {
     .await;
     assert_eq!(result.is_error, Some(false), "{}", text(&result));
 
-    // Запись без --allow-write отклоняется до отправки (mock POST вызывается один раз ниже).
+    // Запись без уровня записи отклоняется до отправки (mock POST вызывается один раз ниже).
     let result = call(
         &read,
         API_REQUEST_TOOL,
@@ -506,7 +510,7 @@ async fn api_request_respects_access() {
     let message = text(&result);
     assert!(message.contains("needs write access"), "{message}");
     assert!(message.contains("`create_comment`"), "{message}");
-    assert!(message.contains("--allow-write"), "{message}");
+    assert!(message.contains("`write` access"), "{message}");
 
     // Изменение прав доступа — уровень удаления, даже для POST.
     let result = call(
@@ -517,7 +521,7 @@ async fn api_request_respects_access() {
     .await;
     assert_eq!(result.is_error, Some(true));
     assert!(
-        text(&result).contains("--allow-destructive"),
+        text(&result).contains("`destructive` access"),
         "{}",
         text(&result)
     );
@@ -546,7 +550,7 @@ async fn api_request_respects_access() {
     read.cancel().await.unwrap();
     server.await.unwrap();
 
-    // С --allow-write тот же запрос уходит в API.
+    // С уровнем записи тот же запрос уходит в API.
     let (write, server) = start(&api, options(AccessLevel::Write, None)).await;
     let result = call(
         &write,
@@ -575,7 +579,10 @@ async fn api_search_finds_disabled_operations() {
         .find(|r| r["tool_name"] == "add_grid_rows")
         .unwrap_or_else(|| panic!("{found}"));
     assert_eq!(rows["registered"], false);
-    assert_eq!(rows["enable_with"], "--allow-write");
+    assert_eq!(
+        rows["enable_with"],
+        "`write` access for the server's profile (`wiki-mcp ui`)"
+    );
 
     let result = call(&client, API_SEARCH_TOOL, json!({"query": "вложения"})).await;
     let found: Value = serde_json::from_str(&text(&result)).unwrap();
@@ -603,7 +610,7 @@ async fn api_search_finds_disabled_operations() {
     assert_eq!(access["registered"], false);
     assert_eq!(
         access["enable_with"],
-        "--allow-destructive --toolsets access"
+        "`destructive` access for the server's profile (`wiki-mcp ui`) and --toolsets access"
     );
 
     let result = call(&client, API_SEARCH_TOOL, json!({"tool_name": "get_grid"})).await;
@@ -778,7 +785,7 @@ async fn files_are_uploaded_and_downloaded_inside_allowed_directories() {
         message.contains("outside the allowed directories"),
         "{message}"
     );
-    assert!(message.contains("--allow-path"), "{message}");
+    assert!(message.contains("allow_path"), "{message}");
 
     // Символическая ссылка наружу отклоняется.
     #[cfg(unix)]

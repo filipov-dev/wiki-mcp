@@ -197,7 +197,11 @@ async fn write_tool_needs_write_access() {
     let (client, _server) = start(&api, AccessLevel::Read).await;
     let result = call(&client, "comment_on_home", json!({"body": {"body": "Hi"}})).await;
     assert_eq!(result.is_error, Some(true));
-    assert!(text(&result).contains("--allow-write"), "{}", text(&result));
+    assert!(
+        text(&result).contains("`write` access"),
+        "{}",
+        text(&result)
+    );
     client.cancel().await.unwrap();
 
     Mock::given(method("POST"))

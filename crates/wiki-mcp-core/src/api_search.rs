@@ -36,7 +36,9 @@ use wiki_api::spec::{AccessLevel, OperationDef, find, operations};
 use crate::composite::Composite;
 use crate::dynamic_toolsets::ENABLE_TOOLSET_TOOL;
 use crate::error::ToolError;
-use crate::registry::{ToolRegistry, access_flag, access_name, uses_local_files};
+use crate::registry::{
+    ToolRegistry, access_hint, access_name, access_requirement, uses_local_files,
+};
 use crate::toolsets::available_toolsets;
 
 /// Имя инструмента.
@@ -158,14 +160,14 @@ pub fn api_search_tool() -> Tool {
     let description = "Search all Yandex Wiki API operations, including those whose tools are \
         not enabled on this server. Each result shows the tool name, HTTP method and path, \
         access level, toolset, required arguments, the API reference page when there is one, \
-        whether the tool is registered here and, if not, which server flag enables it. Pass \
+        whether the tool is registered here and, if not, what enables it (`enable_with`). Pass \
         `tool_name` to get the full input schema of one operation. Matching composite tools, \
         which run several operations in one call (uploading a file as an attachment, waiting \
         for a background operation), are listed separately in `composite_tools`.\n\n\
         If the tool is registered, call it directly. If only its toolset is disabled, enable it \
         with `enable_toolset` when the server offers that tool, or call the same method and path \
         with `api_request`, or ask the user to add the toolset. If it needs a higher access \
-        level, ask the user to restart the server with the named flag. Registered operation \
+        level, ask the user to allow it as `note` says. Registered operation \
         tools and `api_request` accept an optional `jq` filter to shrink the response.\n\n\
         Access: read-only (does not call the API).";
     let mut tool = Tool::new(API_SEARCH_TOOL, description, Arc::new(schema));
@@ -585,7 +587,8 @@ impl Availability {
     }
 }
 
-/// `registered`, а для незарегистрированных — флаги (`enable_with`) и что делать (`note`).
+/// `registered`, а для незарегистрированных — что их включает (`enable_with`: уровень доступа
+/// профиля, флаг `--toolsets`) и что делать (`note`).
 fn insert_availability(entry: &mut Map<String, Value>, op: Availability, registry: &ToolRegistry) {
     let registered = registry.get(op.name).is_some();
     entry.insert("registered".into(), json!(registered));
@@ -606,10 +609,12 @@ fn insert_availability(entry: &mut Map<String, Value>, op: Availability, registr
         );
         return;
     }
-    let mut flags = Vec::new();
+    // Что нужно, чтобы инструмент появился: уровень доступа профиля и (без динамических
+    // наборов) флаг `--toolsets`.
+    let mut needs = Vec::new();
     let access_ok = registry.max_access().allows(op.access);
     if !access_ok {
-        flags.push(access_flag(op.access).to_owned());
+        needs.push(access_requirement(op.access, registry.local_files()));
     }
     if registry.is_dynamic() {
         // Набор агент включает сам; флаг нужен только для уровня доступа.
@@ -636,15 +641,19 @@ fn insert_availability(entry: &mut Map<String, Value>, op: Availability, registr
             return;
         }
     } else if !registry.toolset_enabled(op.toolset) {
-        flags.push(format!("--toolsets {}", op.toolset));
+        needs.push(format!("--toolsets {}", op.toolset));
     }
-    entry.insert("enable_with".into(), json!(flags.join(" ")));
+    entry.insert("enable_with".into(), json!(needs.join(" and ")));
     let note = if access_ok {
         "Its toolset is not enabled: call the same method and path with `api_request`, or ask \
          the user to add the toolset to --toolsets."
+            .to_owned()
     } else {
-        "Needs a higher access level than this server allows: ask the user to restart the server \
-         with the flag in `enable_with` if the change is intended."
+        format!(
+            "Needs a higher access level than this server allows: ask the user to {} if the \
+             change is intended.",
+            access_hint(op.access, registry.local_files())
+        )
     };
     entry.insert("note".into(), json!(note));
 }
@@ -897,7 +906,10 @@ mod tests {
         assert_eq!(upload["access"], "write");
         assert_eq!(upload["toolset"], "attachments");
         assert_eq!(upload["registered"], false);
-        assert_eq!(upload["enable_with"], "--allow-write");
+        assert_eq!(
+            upload["enable_with"],
+            "`write` access for the server's profile (`wiki-mcp ui`)"
+        );
         assert_eq!(upload["required_params"], json!(["idx", "file"]));
         assert!(
             upload["calls"]
@@ -980,7 +992,10 @@ mod tests {
         assert_eq!(create["access"], "write");
         assert_eq!(create["toolset"], "comments");
         assert_eq!(create["registered"], false);
-        assert_eq!(create["enable_with"], "--allow-write");
+        assert_eq!(
+            create["enable_with"],
+            "`write` access for the server's profile (`wiki-mcp ui`)"
+        );
         assert!(
             create["required_params"]
                 .as_array()
@@ -988,7 +1003,10 @@ mod tests {
                 .contains(&json!("idx"))
         );
         let delete = entry(&result, "delete_comment");
-        assert_eq!(delete["enable_with"], "--allow-destructive");
+        assert_eq!(
+            delete["enable_with"],
+            "`destructive` access for the server's profile (`wiki-mcp ui`)"
+        );
         let list = entry(&result, "list_comments");
         assert_eq!(list["registered"], true);
         assert!(list.get("enable_with").is_none());
@@ -999,7 +1017,7 @@ mod tests {
         assert_eq!(access["registered"], false);
         assert_eq!(
             access["enable_with"],
-            "--allow-destructive --toolsets access"
+            "`destructive` access for the server's profile (`wiki-mcp ui`) and --toolsets access"
         );
 
         // Набор выключен, уровень хватает: подсказка про `api_request`.
@@ -1015,7 +1033,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             result["enable_with"],
-            "--allow-destructive --toolsets grids"
+            "`destructive` access for the server's profile (`wiki-mcp ui`) and --toolsets grids"
         );
     }
 
@@ -1067,7 +1085,10 @@ mod tests {
 
         // Выше уровня доступа — только флаг сервера, без `--toolsets`.
         let result = run(json!({"tool_name": "delete_page"}), &dynamic).unwrap();
-        assert_eq!(result["enable_with"], "--allow-destructive");
+        assert_eq!(
+            result["enable_with"],
+            "`destructive` access for the server's profile (`wiki-mcp ui`)"
+        );
     }
 
     #[test]
@@ -1137,7 +1158,10 @@ mod tests {
         assert_eq!(result["tool_name"], "create_page");
         assert_eq!(result["method"], "POST");
         assert_eq!(result["registered"], false);
-        assert_eq!(result["enable_with"], "--allow-write");
+        assert_eq!(
+            result["enable_with"],
+            "`write` access for the server's profile (`wiki-mcp ui`)"
+        );
         assert_eq!(result["input_schema"]["type"], "object");
         assert!(result["input_schema"]["properties"]["body"].is_object());
 

@@ -298,7 +298,6 @@ pub async fn check_iam<V: TokenVerifier>(
 
 #[cfg(all(test, unix))]
 pub mod testing {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     /// Подменный `yc` во временном каталоге: печатает `iam-token-<номер вызова>`, считает
@@ -308,19 +307,35 @@ pub mod testing {
         dir: tempfile::TempDir,
     }
 
+    /// Пишет исполняемый скрипт через отдельный процесс `sh`: если тест держит
+    /// открытый на запись дескриптор, параллельный тест может унаследовать его
+    /// при fork, и запуск скрипта падает с «Text file busy» (ETXTBSY).
+    fn write_script(path: &std::path::Path, content: &str) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(content.as_bytes()).unwrap();
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+    }
+
     impl FakeYc {
         pub fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let script = dir.path().join("yc");
-            std::fs::write(
+            write_script(
                 &script,
                 "#!/bin/sh\ndir=$(dirname \"$0\")\nn=$(cat \"$dir/count\" 2>/dev/null || echo 0)\n\
                  n=$((n + 1))\necho \"$n\" > \"$dir/count\"\necho \"$@\" > \"$dir/args\"\n\
                  if [ -f \"$dir/fail\" ]; then echo 'denied t1.LeakedSecretValue0123456' >&2; exit 1; fi\n\
                  echo \"iam-token-$n\"\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             Self { dir }
         }
 
