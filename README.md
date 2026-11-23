@@ -17,7 +17,7 @@ MCP-сервер и CLI для [Yandex Wiki Public API](https://yandex.ru/suppor
 ### Установочный скрипт (Linux и macOS)
 
 ```bash
-curl -fsSL https://codeload.sourcecraft.tech/filipov-dev/wiki-mcp/tarball/refs/heads/install | tar -xzO | sh
+curl -fsSL https://codeload.github.com/filipov-dev/wiki-mcp/tar.gz/refs/heads/install | tar -xzO | sh
 ```
 
 Скрипт ставит последнюю версию в `~/.local/bin` без `sudo` и сверяет архив с `SHA256SUMS` релиза; повторный запуск обновляет бинарник. Параметры (`--version`, `--prefix`) — в [docs/install.md](docs/install.md#установочный-скрипт).
@@ -33,7 +33,7 @@ Tap размещён на SourceCraft, поэтому `brew tap` нужен по
 
 ### Готовый архив
 
-Архивы для macOS (универсальный, подписан и нотаризован), Linux x86_64 и aarch64 (статические, без зависимостей), Windows x86_64 (`.zip`, без зависимостей, не подписан) и `SHA256SUMS` — на [странице релизов](https://sourcecraft.dev/filipov-dev/wiki-mcp/releases). Установка в Windows — [docs/install.md](docs/install.md#windows).
+Архивы для macOS (универсальный, подписан и нотаризован), Linux x86_64 и aarch64 (статические, без зависимостей), Windows x86_64 (`.zip`, без зависимостей, не подписан) и `SHA256SUMS` — на [странице релизов на GitHub](https://github.com/filipov-dev/wiki-mcp/releases) (код — в [SourceCraft](https://sourcecraft.dev/filipov-dev/wiki-mcp) и в его копии на GitHub). Установка в Windows — [docs/install.md](docs/install.md#windows).
 
 ### Из исходников
 
