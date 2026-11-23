@@ -27,6 +27,10 @@ v0.3.1 wiki-mcp-v0.3.1-macos-universal.tar.gz 70abe61dfb9e04d7f0408ceca58ae7c113
 v0.3.1 wiki-mcp-v0.3.1-linux-x86_64.tar.gz 01597e2e17462037ac67363b74f519e7fb77991b0c9e5b881fb7585eb91a87df https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.1/wiki-mcp-v0.3.1-linux-x86_64.tar.gz
 v0.3.1 wiki-mcp-v0.3.1-linux-aarch64.tar.gz 38eb97b9344147322287b147f2b4fe27d67c43d42c7e396565fc94a6b769fa6c https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.1/wiki-mcp-v0.3.1-linux-aarch64.tar.gz
 v0.3.1 SHA256SUMS - https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.1/SHA256SUMS
+v0.3.0 wiki-mcp-v0.3.0-macos-universal.tar.gz 08f1a5457a501e633af1096a8f63e25b9b6947c25e51f955fe0ca590f60a7044 https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.0/wiki-mcp-v0.3.0-macos-universal.tar.gz
+v0.3.0 wiki-mcp-v0.3.0-linux-x86_64.tar.gz f508fadb06cb83a1c31cc9a096067390037dc917c5ddf7a4cca67dece9ab4c42 https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.0/wiki-mcp-v0.3.0-linux-x86_64.tar.gz
+v0.3.0 wiki-mcp-v0.3.0-linux-aarch64.tar.gz bc02b34ea9614a825fee6f366ac733fe7607329cf5b1eb2d5619e1b5f2940cbe https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.0/wiki-mcp-v0.3.0-linux-aarch64.tar.gz
+v0.3.0 SHA256SUMS - https://github.com/filipov-dev/wiki-mcp/releases/download/v0.3.0/SHA256SUMS
 v0.2.0 wiki-mcp-v0.2.0-macos-universal.tar.gz dd2d3c2fc4c3cec5bfa49a99cee10ee5495364e342afc039c912cca64eb3cd6e https://github.com/filipov-dev/wiki-mcp/releases/download/v0.2.0/wiki-mcp-v0.2.0-macos-universal.tar.gz
 v0.2.0 wiki-mcp-v0.2.0-linux-x86_64.tar.gz c1a8ac04258c090ffae85a3a59c9b9e69ecae0ae1a83b3ea5ffdef178bd3adb8 https://github.com/filipov-dev/wiki-mcp/releases/download/v0.2.0/wiki-mcp-v0.2.0-linux-x86_64.tar.gz
 v0.2.0 wiki-mcp-v0.2.0-linux-aarch64.tar.gz 1f7ff68db30f11afcaabbec8ddfb892cfbf647aaf65ef8a13b0a6bc2b95b3c4f https://github.com/filipov-dev/wiki-mcp/releases/download/v0.2.0/wiki-mcp-v0.2.0-linux-aarch64.tar.gz
